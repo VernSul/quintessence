@@ -316,26 +316,41 @@ const PROGRESSIONS=[
 function buildChroma(fd,sr,fftSize){
   const c=new Float32Array(12).fill(0);
   const bHz=sr/fftSize;
+  const harmonicWeights=[1.0,0.5,0.33,0.25,0.2];
   for(let i=1;i<fd.length;i++){
     const freq=i*bHz;
-    if(freq<55||freq>3000)continue;
+    if(freq<60||freq>4000)continue;
+    if(fd[i]<-90)continue;
     const amp=Math.pow(10,fd[i]/20);
     const midi=12*Math.log2(freq/440)+69;
-    const pc=((Math.round(midi)%12)+12)%12;
-    c[pc]+=amp;
+    const midiRound=Math.round(midi);
+    const tuneErr=Math.abs(midi-midiRound);
+    if(tuneErr>0.45)continue;
+    const pc=((midiRound%12)+12)%12;
+    const octave=Math.max(0,Math.floor(Math.log2(freq/260)));
+    const hw=harmonicWeights[Math.min(octave,harmonicWeights.length-1)];
+    c[pc]+=amp*hw;
   }
-  const mx=Math.max(...c,.001);
-  return c.map(v=>v/mx);
+  let mx=0;for(let i=0;i<12;i++)if(c[i]>mx)mx=c[i];
+  if(mx<0.0001)return c;
+  for(let i=0;i<12;i++)c[i]/=mx;
+  return c;
 }
 function scoreChord(chroma,root,tmpl){
   let s=0;for(const o of tmpl)s+=chroma[(root+o)%12];
-  let p=0;for(let i=0;i<12;i++)if(!tmpl.includes(((i-root)+12)%12))p+=chroma[i]*.25;
-  return s/tmpl.length-p;
+  let p=0,n=0;
+  for(let i=0;i<12;i++){if(!tmpl.includes(((i-root)+12)%12)){p+=chroma[i];n++;}}
+  return s/tmpl.length-(n>0?(p/n)*0.15:0);
 }
 function detectChord(chroma){
+  let totalEnergy=0;for(let i=0;i<12;i++)totalEnergy+=chroma[i];
+  if(totalEnergy<0.5)return null;
   let best={root:0,type:'maj',score:-Infinity};
-  for(let r=0;r<12;r++)for(const[t,f]of Object.entries(CHORD_FORMULAS)){const s=scoreChord(chroma,r,f);if(s>best.score)best={root:r,type:t,score:s};}
-  return best.score>.2?best:null;
+  for(let r=0;r<12;r++)for(const[t,f]of Object.entries(CHORD_FORMULAS)){
+    const s=scoreChord(chroma,r,f);
+    if(s>best.score)best={root:r,type:t,score:s};
+  }
+  return best.score>0.08?best:null;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -808,10 +823,10 @@ function App(){
       const ctx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
       audioCtxRef.current=ctx;
       const src=ctx.createMediaStreamSource(stream);
-      const an=ctx.createAnalyser();an.fftSize=8192;an.smoothingTimeConstant=.65;
+      const an=ctx.createAnalyser();an.fftSize=8192;an.smoothingTimeConstant=0.3;
       analyserRef.current=an;src.connect(an);setListening(true);
       const fd=new Float32Array(an.frequencyBinCount);
-      const poll=()=>{an.getFloatFrequencyData(fd);const mx=Math.max(...Array.from(fd).slice(0,600));if(mx>-52){setDetChord(detectChord(buildChroma(fd,44100,8192)));}else setDetChord(null);rafRef.current=requestAnimationFrame(poll);};
+      const poll=()=>{an.getFloatFrequencyData(fd);const mx=Math.max(...Array.from(fd).slice(0,600));if(mx>-75){setDetChord(detectChord(buildChroma(fd,44100,8192)));}else setDetChord(null);rafRef.current=requestAnimationFrame(poll);};
       poll();
     }catch(e){alert('Micro refusé : '+e.message);}
   },[]);
@@ -1104,11 +1119,21 @@ function App(){
         <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'7px 11px',display:'flex',alignItems:'center',gap:9}}>
           <div style={{width:7,height:7,borderRadius:'50%',background:detChord?'#4CAF50':'#1a1a28',boxShadow:detChord?'0 0 8px #4CAF5088':'none',transition:'all .1s',flexShrink:0}}/>
           <div style={{flex:1}}>
-            <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>DÉTECTÉ (FFT)</div>
+            <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>DÉTECTÉ (FFT)
+              {detChord&&<span style={{marginLeft:8,color:'#1e3a2a',fontSize:7}}>
+                conf: {Math.round(Math.min(100,detChord.score*100))}%
+              </span>}
+            </div>
             <div style={{fontSize:15,color:detChord?'#c8e8d0':'#252535',fontFamily:'Georgia,serif'}}>
               {detChord?chordName(detChord.root,detChord.type):'—'}
               {detChord&&<span style={{fontSize:9,color:'#3a3a4e',marginLeft:5}}>{Q[detChord.type]?.label}</span>}
             </div>
+            {/* Confidence bar */}
+            {detChord&&<div style={{height:2,background:'#0e1a14',borderRadius:1,marginTop:3,overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${Math.min(100,detChord.score*100)}%`,
+                background:detChord.score>0.5?'#00E676':detChord.score>0.25?'#FFB300':'#FF4081',
+                borderRadius:1,transition:'width .15s'}}/>
+            </div>}
           </div>
           {acc!=null&&<div style={{textAlign:'right'}}>
             <div style={{fontSize:19,fontWeight:200,color:acc>=70?'#00E676':acc>=40?'#FFB300':'#FF4081',fontFamily:'Georgia,serif'}}>{acc}%</div>
