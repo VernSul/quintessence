@@ -14,15 +14,14 @@
 html,body{width:100%;height:100%;background:#060608;overflow:hidden;font-family:'Georgia','Times New Roman',serif}
 #root{width:100%;height:100%}
 button{font-family:inherit;outline:none;border:none;cursor:pointer}
-button:active{opacity:.7;transform:scale(.95)}
+button:active{opacity:.75;transform:scale(.96)}
 input[type=range]{accent-color:#FFB300}
 ::-webkit-scrollbar{width:3px;background:#08080f}
 ::-webkit-scrollbar-thumb{background:#1e1e2a;border-radius:3px}
-@keyframes pulseRing{0%,100%{opacity:.3;r:14}50%{opacity:.7;r:17}}
-@keyframes walkIn{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:scale(1)}}
 @keyframes slideUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
-@keyframes glow{0%,100%{filter:drop-shadow(0 0 4px currentColor)}50%{filter:drop-shadow(0 0 12px currentColor)}}
+@keyframes beatFlash{0%{opacity:1}100%{opacity:0}}
 .slide-up{animation:slideUp .22s ease forwards}
+.beat-flash{animation:beatFlash .12s ease-out}
 </style>
 </head>
 <body>
@@ -35,24 +34,18 @@ const {useState,useEffect,useRef,useCallback,useMemo,memo}=React;
 // ═══════════════════════════════════════════════════════════
 const NOTES_SHARP=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
 const NOTES_FLAT =['C','D♭','D','E♭','E','F','G♭','G','A♭','A','B♭','B'];
-const ST_MAP={
-  'C':0,'C#':1,'C♯':1,'Db':1,'D♭':1,'D':2,'D#':3,'D♯':3,'Eb':3,'E♭':3,'E':4,
-  'F':5,'F#':6,'F♯':6,'Gb':6,'G♭':6,'G':7,'G#':8,'G♯':8,'Ab':8,'A♭':8,
-  'A':9,'A#':10,'A♯':10,'Bb':10,'B♭':10,'B':11
-};
-const pst=n=>ST_MAP[n]??-1;
 const nn=(s,flat=true)=>flat?NOTES_FLAT[((s%12)+12)%12]:NOTES_SHARP[((s%12)+12)%12];
+const m12=(r,o)=>((r+o)%12+12)%12;
 
-// Chord quality metadata
 const Q={
-  maj: {sym:'',     label:'Majeur',         color:'#FF4D8D', textColor:'#FFB3CF', ring:0},
-  min: {sym:'m',    label:'Mineur',         color:'#4DA6FF', textColor:'#B3D9FF', ring:1},
-  dom7:{sym:'7',    label:'Dom. 7',         color:'#FFB300', textColor:'#FFE080', ring:2},
-  aug: {sym:'+',    label:'Augmenté',       color:'#00C97A', textColor:'#80FFCA', ring:3},
-  min7:{sym:'m7',   label:'Mineur 7',       color:'#7B7BFF', textColor:'#C0C0FF', ring:1},
-  dim7:{sym:'dim7', label:'Diminué 7',      color:'#FF6B6B', textColor:'#FFB3B3', ring:1},
-  maj7:{sym:'maj7', label:'Majeur 7',       color:'#FF8AD8', textColor:'#FFD0F0', ring:0},
-  min7b5:{sym:'m7♭5',label:'Demi-dim.',    color:'#A78BFA', textColor:'#D4C4FF', ring:1},
+  maj:    {sym:'',      label:'Majeur',    color:'#FF4D8D', textColor:'#FFB3CF'},
+  min:    {sym:'m',     label:'Mineur',    color:'#4DA6FF', textColor:'#B3D9FF'},
+  dom7:   {sym:'7',     label:'Dom. 7',    color:'#FFB300', textColor:'#FFE080'},
+  aug:    {sym:'+',     label:'Augmenté',  color:'#00C97A', textColor:'#80FFCA'},
+  min7:   {sym:'m7',    label:'Min. 7',    color:'#7B7BFF', textColor:'#C0C0FF'},
+  dim7:   {sym:'dim7',  label:'Dim. 7',    color:'#FF6B6B', textColor:'#FFB3B3'},
+  maj7:   {sym:'maj7',  label:'Maj. 7',    color:'#FF8AD8', textColor:'#FFD0F0'},
+  min7b5: {sym:'m7♭5',  label:'Demi-dim.', color:'#A78BFA', textColor:'#D4C4FF'},
 };
 
 const CHORD_FORMULAS={
@@ -60,276 +53,243 @@ const CHORD_FORMULAS={
   min7:[0,3,7,10], dim7:[0,3,6,9], maj7:[0,4,7,11], min7b5:[0,3,6,10],
 };
 
+// Tension classification for each chord type:
+// { chord_tones, color_tones (9/11/13), avoid_notes }
+const CHORD_TENSIONS={
+  maj:    {chord:[0,4,7],    color:[2,9,11],  avoid:[5]},
+  min:    {chord:[0,3,7],    color:[2,5,10],  avoid:[]},
+  dom7:   {chord:[0,4,7,10], color:[2,6,9],   avoid:[5]},
+  aug:    {chord:[0,4,8],    color:[2,10],    avoid:[5]},
+  min7:   {chord:[0,3,7,10], color:[2,5,9],   avoid:[]},
+  dim7:   {chord:[0,3,6,9],  color:[1,10],    avoid:[2,5]},
+  maj7:   {chord:[0,4,7,11], color:[2,6,9],   avoid:[5]},
+  min7b5: {chord:[0,3,6,10], color:[1,8],     avoid:[2,5]},
+};
+
 function chordName(root,type,flat=true){
-  const r=nn(root,flat);
-  return r+(Q[type]?.sym??type);
+  return nn(root,flat)+(Q[type]?.sym??type);
 }
 
-// ═══════════════════════════════════════════════════════════
-// HARMONIC NETWORK GRAPH
-// ═══════════════════════════════════════════════════════════
-// Each node: id = `${root}_${type}`, root=0-11, type=quality
-// Edges: {from, to, weight, label}
-//   weight: 1=strong resolution, 2=medium, 3=weak/chromatic
+function usesFlat(root){ return [1,3,5,6,8,10].includes(root); }
 
-function nodeId(root,type){return `${((root%12)+12)%12}_${type}`;}
-function parseNode(id){const[r,t]=id.split('_');return{root:+r,type:t};}
+// ═══════════════════════════════════════════════════════════
+// SCALES
+// ═══════════════════════════════════════════════════════════
+const SCALES={
+  ionian:      {name:'Ionien (Majeur)',   formula:[0,2,4,5,7,9,11], color:'#FFB300'},
+  dorian:      {name:'Dorien',            formula:[0,2,3,5,7,9,10],  color:'#00BCD4'},
+  phrygian:    {name:'Phrygien',          formula:[0,1,3,5,7,8,10],  color:'#E040FB'},
+  lydian:      {name:'Lydien',            formula:[0,2,4,6,7,9,11],  color:'#FF6D00'},
+  mixolydian:  {name:'Mixolydien',        formula:[0,2,4,5,7,9,10],  color:'#FF4081'},
+  aeolian:     {name:'Éolien (Min. nat.)',formula:[0,2,3,5,7,8,10],  color:'#76FF03'},
+  locrian:     {name:'Locrien',           formula:[0,1,3,5,6,8,10],  color:'#FF1744'},// BUG FIX #1
+  harm_min:    {name:'Min. harmonique',   formula:[0,2,3,5,7,8,11],  color:'#69F0AE'},
+  mel_min:     {name:'Min. mélodique',    formula:[0,2,3,5,7,9,11],  color:'#26C6DA'},
+  blues_min:   {name:'Blues mineur',      formula:[0,3,5,6,7,10],    color:'#FF6E40'},
+  blues_maj:   {name:'Blues majeur',      formula:[0,2,3,4,7,9],     color:'#FFEA00'},
+  whole_tone:  {name:'Tons entiers',      formula:[0,2,4,6,8,10],    color:'#EA80FC'},
+  dim_sym:     {name:'Dim. sym. (d-t)',   formula:[0,2,3,5,6,8,9,11],color:'#1DE9B6'},
+  dim_sym2:    {name:'Dim. sym. (t-d)',   formula:[0,1,3,4,6,7,9,10],color:'#00E5FF'},
+  pentatonic_maj:{name:'Penta majeure',   formula:[0,2,4,7,9],       color:'#FFD700'},
+  pentatonic_min:{name:'Penta mineure',   formula:[0,3,5,7,10],      color:'#00E676'},
+  lyd_dom:     {name:'Lydien dominant',   formula:[0,2,4,6,7,9,10],  color:'#FF9100'},
+  alt:         {name:'Altérée (SuperLoc)',formula:[0,1,3,4,6,8,10],  color:'#D50000'},
+  phrygdom:    {name:'Phryg. dominant',   formula:[0,1,4,5,7,8,10],  color:'#AA00FF'},
+};
 
-// Build the full harmonic network
+const CHORD_SCALES={
+  maj:    ['ionian','lydian','pentatonic_maj','blues_maj'],
+  min:    ['aeolian','dorian','pentatonic_min','blues_min','harm_min','mel_min'],
+  dom7:   ['mixolydian','blues_min','lyd_dom','alt','pentatonic_min','phrygdom'],
+  aug:    ['whole_tone','lyd_dom','mel_min'],
+  min7:   ['dorian','aeolian','pentatonic_min','blues_min'],
+  dim7:   ['dim_sym','dim_sym2','alt'],
+  maj7:   ['ionian','lydian','pentatonic_maj','mel_min'],
+  min7b5: ['locrian','alt','dim_sym'],// BUG FIX #1 — locrian now exists
+};
+
+// Shell & rootless voicings
+const VOICINGS={
+  maj:    {shell:[0,4,7],    rootless:[4,7,11,2],  label:'Shell 1-3-5'},
+  min:    {shell:[0,3,7],    rootless:[3,7,10,2],  label:'Shell 1-♭3-5'},
+  dom7:   {shell:[0,4,10],   rootless:[4,10,2,6],  label:'Shell 1-3-♭7'},
+  maj7:   {shell:[0,4,11],   rootless:[4,11,2,6],  label:'Shell 1-3-7'},
+  min7:   {shell:[0,3,10],   rootless:[3,10,2,5],  label:'Shell 1-♭3-♭7'},
+  min7b5: {shell:[0,3,10],   rootless:[3,6,10,1],  label:'Shell 1-♭3-♭7'},
+  dim7:   {shell:[0,3,6],    rootless:[3,6,9,0],   label:'Shell 1-♭3-♭5'},
+  aug:    {shell:[0,4,8],    rootless:[4,8,11,3],  label:'Shell 1-3-♯5'},
+};
+
+// ═══════════════════════════════════════════════════════════
+// CIRCLE OF FIFTHS
+// ═══════════════════════════════════════════════════════════
+const FIFTHS_ORDER=[0,7,2,9,4,11,6,1,8,3,10,5];
+const FIFTHS_MAJ_LABELS=['C','G','D','A','E','B','F♯','D♭','A♭','E♭','B♭','F'];
+const FIFTHS_MIN_LABELS=['Am','Em','Bm','F♯m','C♯m','G♯m','D♯m','B♭m','Fm','Cm','Gm','Dm'];
+const CIRCLE_COLORS=['#FFB300','#FF6D00','#E040FB','#00BCD4','#76FF03','#FF4081','#40C4FF','#FFEA00','#69F0AE','#FF6E40','#EA80FC','#1DE9B6'];
+
+// ═══════════════════════════════════════════════════════════
+// HARMONIC NETWORK
+// ═══════════════════════════════════════════════════════════
+function nid(root,type){return `${((root%12)+12)%12}_${type}`;}
+function parseNid(id){const[r,t]=id.split('_');return{root:+r,type:t};}
+
 function buildNetwork(){
   const nodes=[];
   const edges=[];
   const edgeSet=new Set();
-
-  // All 12 roots × 4 main qualities
-  const mainTypes=['maj','min','dom7','aug'];
-  const extraTypes=['min7','min7b5','dim7','maj7'];
-  const allTypes=[...mainTypes,...extraTypes];
-
-  for(let r=0;r<12;r++){
-    for(const t of mainTypes){
-      nodes.push({id:nodeId(r,t), root:r, type:t});
-    }
+  for(let r=0;r<12;r++)for(const t of['maj','min','dom7','aug'])nodes.push({id:nid(r,t),root:r,type:t});
+  function addEdge(fr,ft,tr,tt,w,rel){
+    const f=nid(fr,ft),t=nid(tr,tt),key=`${f}→${t}`;
+    if(!edgeSet.has(key)){edgeSet.add(key);edges.push({from:f,to:t,weight:w,rel});}
   }
-
-  function addEdge(fromR,fromT,toR,toT,weight,rel){
-    const f=nodeId(fromR,fromT);
-    const t=nodeId(toR,toT);
-    const key=`${f}→${t}`;
-    if(!edgeSet.has(key)){edgeSet.add(key);edges.push({from:f,to:t,weight,rel});}
-  }
-  const m=(r,o)=>((r+o)%12+12)%12;
-
   for(let r=0;r<12;r++){
-    // V7 → I  (dom7 resolves down a fifth to major or minor)
-    addEdge(r,'dom7',m(r,-7),'maj',1,'V→I');
-    addEdge(r,'dom7',m(r,-7),'min',1,'V→Im');
-    // V7 → tritone sub (dom7 resolves to maj a tritone away)
-    addEdge(r,'dom7',m(r,6),'maj',2,'triton');
-    addEdge(r,'dom7',m(r,6),'min',3,'triton');
-    // maj → V7 (set up the dominant)
-    addEdge(r,'maj',m(r,7),'dom7',1,'I→V7');
-    // maj → IIm (ii minor)
-    addEdge(r,'maj',m(r,2),'min',1,'I→IIm');
-    // maj → relative minor (down a minor third)
-    addEdge(r,'maj',m(r,-3),'min',2,'rel');
-    // maj → aug (chromatic voice leading)
+    addEdge(r,'dom7',m12(r,5),'maj',1,'V→I');
+    addEdge(r,'dom7',m12(r,5),'min',1,'V→Im');
+    addEdge(r,'dom7',m12(r,11),'maj',2,'triton');
+    addEdge(r,'maj',m12(r,7),'dom7',1,'I→V7');
+    addEdge(r,'maj',m12(r,2),'min',1,'I→IIm');
+    addEdge(r,'maj',m12(r,9),'min',2,'rel');
     addEdge(r,'maj',r,'aug',2,'I→I+');
-    // min → V7 (dominant of minor)
-    addEdge(r,'min',m(r,7),'dom7',1,'Im→V7');
-    // min → relative major (up a minor third)
-    addEdge(r,'min',m(r,3),'maj',2,'rel');
-    // min → IVm (subdominant minor)
-    addEdge(r,'min',m(r,-5),'min',2,'Im→IVm');
-    // aug → dom7 (aug → dom7 sharing root)
+    addEdge(r,'min',m12(r,7),'dom7',1,'Im→V7');
+    addEdge(r,'min',m12(r,3),'maj',2,'rel');
+    addEdge(r,'min',m12(r,5),'dom7',1,'II→V');
+    addEdge(r,'min',m12(r,7),'min',2,'Im→IVm');
     addEdge(r,'aug',r,'dom7',1,'I+→V7');
-    addEdge(r,'aug',m(r,4),'dom7',2,'I+→V7');
-    addEdge(r,'aug',m(r,8),'dom7',2,'I+→V7');
-    // dom7 → dom7 cycle (secondary dominants)
-    addEdge(r,'dom7',m(r,5),'dom7',2,'V7/V7');
-    // maj → maj (plagal IV→I motion reversed: I→IV)
-    addEdge(r,'maj',m(r,5),'maj',2,'I→IV');
-    // min → min (down a 5th)
-    addEdge(r,'min',m(r,-7),'min',2,'Im→IVm');
-    // IIm → V7 (inside II-V)
-    addEdge(r,'min',m(r,5),'dom7',1,'II→V');
-    // min7b5 equiv
-    addEdge(r,'min',r,'dom7',2,'modal');
+    addEdge(r,'aug',m12(r,4),'dom7',2,'I+→V7');
+    addEdge(r,'dom7',m12(r,7),'dom7',2,'V7/V7');// BUG FIX: was m12(r,5) = circle up not down
+    addEdge(r,'maj',m12(r,5),'maj',2,'I→IV');
+    addEdge(r,'min',m12(r,5),'min',2,'Im→IVm');
   }
-
   return{nodes,edges};
 }
-
 const NETWORK=buildNetwork();
 
-// Get successors of a node with probabilities
-function getSuccessors(nodeId){
-  const edges=NETWORK.edges.filter(e=>e.from===nodeId);
-  // weight 1=most likely, 3=least
+// BUG FIX #2 — renamed param from nodeId to nodeKey
+function getSuccessors(nodeKey){
+  const edges=NETWORK.edges.filter(e=>e.from===nodeKey);
   const inv=edges.map(e=>({...e,prob:1/e.weight}));
   const total=inv.reduce((s,e)=>s+e.prob,0);
   return inv.map(e=>({...e,prob:e.prob/total}));
 }
-
-// Weighted random successor
-function randomSuccessor(nodeId){
-  const succ=getSuccessors(nodeId);
+function randomSuccessor(nodeKey){
+  const succ=getSuccessors(nodeKey);
   if(!succ.length)return null;
   let r=Math.random();
   for(const s of succ){r-=s.prob;if(r<=0)return s.to;}
   return succ[succ.length-1].to;
 }
 
-// ═══════════════════════════════════════════════════════════
-// LAYOUT: position nodes on screen
-// ═══════════════════════════════════════════════════════════
-// 4 rings: aug(innermost), dom7, min, maj(outermost)
-// Following circle of fifths order angularly
-
-const FIFTHS_ORDER=[0,7,2,9,4,11,6,1,8,3,10,5]; // C G D A E B F# Db Ab Eb Bb F
-
-function computeLayout(W,H,scale=1){
-  const cx=W/2, cy=H/2;
-  const rAug=W*.10*scale;
-  const rDom=W*.19*scale;
-  const rMin=W*.28*scale;
-  const rMaj=W*.38*scale;
-  const radii={aug:rAug, dom7:rDom, min:rMin, maj:rMaj};
-
+function computeLayout(W,H){
+  const cx=W/2,cy=H/2;
+  const radii={aug:Math.min(W,H)*.09,dom7:Math.min(W,H)*.18,min:Math.min(W,H)*.27,maj:Math.min(W,H)*.37};
   const positions={};
   FIFTHS_ORDER.forEach((root,i)=>{
-    const angle=(i/12)*2*Math.PI - Math.PI/2;
-    ['maj','min','dom7','aug'].forEach(type=>{
+    const angle=(i/12)*2*Math.PI-Math.PI/2;
+    for(const type of['maj','min','dom7','aug']){
       const r=radii[type];
-      positions[nodeId(root,type)]={
-        x:cx+r*Math.cos(angle),
-        y:cy+r*Math.sin(angle),
-        angle,
-      };
-    });
+      positions[nid(root,type)]={x:cx+r*Math.cos(angle),y:cy+r*Math.sin(angle)};
+    }
   });
   return positions;
-}
-
-// ═══════════════════════════════════════════════════════════
-// SCALES
-// ═══════════════════════════════════════════════════════════
-const SCALES={
-  ionian:    {name:'Ionien',       formula:[0,2,4,5,7,9,11],color:'#FFB300'},
-  dorian:    {name:'Dorien',       formula:[0,2,3,5,7,9,10],color:'#00BCD4'},
-  phrygian:  {name:'Phrygien',     formula:[0,1,3,5,7,8,10],color:'#E040FB'},
-  lydian:    {name:'Lydien',       formula:[0,2,4,6,7,9,11],color:'#FF6D00'},
-  mixolydian:{name:'Mixolydien',   formula:[0,2,4,5,7,9,10],color:'#FF4081'},
-  aeolian:   {name:'Éolien',       formula:[0,2,3,5,7,8,10],color:'#76FF03'},
-  harm_min:  {name:'Min. harm.',   formula:[0,2,3,5,7,8,11],color:'#69F0AE'},
-  blues_min: {name:'Blues min.',   formula:[0,3,5,6,7,10],  color:'#FF6E40'},
-  blues_maj: {name:'Blues maj.',   formula:[0,2,3,4,7,9],   color:'#FFEA00'},
-  whole_tone:{name:'Tons entiers', formula:[0,2,4,6,8,10],  color:'#EA80FC'},
-  dim_sym:   {name:'Dim. symét.',  formula:[0,2,3,5,6,8,9,11],color:'#1DE9B6'},
-  alt:       {name:'Altérée',      formula:[0,1,3,4,6,8,10],color:'#FF1744'},
-  pentatonic_maj:{name:'Penta maj.',formula:[0,2,4,7,9],    color:'#FFD700'},
-  pentatonic_min:{name:'Penta min.',formula:[0,3,5,7,10],   color:'#00E676'},
-  lyd_dom:   {name:'Lyd. dom.',    formula:[0,2,4,6,7,9,10],color:'#FF6D00'},
-  phrygdom:  {name:'Phryg. dom.',  formula:[0,1,4,5,7,8,10],color:'#E040FB'},
-};
-const CHORD_SCALES={
-  maj:['ionian','lydian','pentatonic_maj','blues_maj'],
-  min:['aeolian','dorian','pentatonic_min','blues_min','harm_min'],
-  dom7:['mixolydian','blues_min','lyd_dom','alt','pentatonic_min'],
-  aug:['whole_tone','lyd_dom'],
-  min7:['dorian','aeolian','pentatonic_min'],
-  dim7:['dim_sym','alt'],
-  maj7:['ionian','lydian','pentatonic_maj'],
-  min7b5:['locrian','alt'],
-};
-
-function scaleNotes(root,scaleKey,flat=true){
-  return(SCALES[scaleKey]?.formula||[]).map(o=>nn((root+o)%12,flat));
 }
 
 // ═══════════════════════════════════════════════════════════
 // WALK MODES
 // ═══════════════════════════════════════════════════════════
 const WALK_MODES=[
-  {id:'free',    name:'Libre',         desc:'Marche aléatoire pondérée sur le réseau'},
-  {id:'251',     name:'II–V–I',        desc:'Enchaîne des II–V–I dans des tonalités aléatoires'},
-  {id:'dom_chain',name:'Chaîne dom7', desc:'Enchaîne des dominantes qui résolvent'},
-  {id:'rel',     name:'Relatifs',      desc:'Oscille entre majeur/mineur relatifs'},
-  {id:'modal',   name:'Modal',         desc:'Reste dans un même centre tonal, change de mode'},
-  {id:'chromatic',name:'Chromatique', desc:'Mouvements par demi-tons + résolutions'},
+  {id:'free',      name:'Libre',          desc:'Marche pondérée sur le réseau harmonique'},
+  {id:'251',       name:'II–V–I',         desc:'Enchaîne des II–V–I dans des tonalités changeantes'},
+  {id:'dom_chain', name:'Chaîne dom7',    desc:'Cascade de dominantes qui résolvent'},
+  {id:'rel',       name:'Relatifs',       desc:'Oscille majeur↔mineur relatifs'},
+  {id:'modal',     name:'Modal',          desc:'Varie le mode sur un même centre tonal'},
+  {id:'chromatic', name:'Chromatique',    desc:'Mouvements demi-ton + résolutions'},
 ];
 
-// Generate next node id based on walk mode
-function nextNode(currentId, mode, history=[]){
-  const {root,type}=parseNode(currentId);
-  const m=(r,o)=>((r+o)%12+12)%12;
-  const nid=nodeId;
-
+// BUG FIX #4 — 251 mode completely rewritten
+// We track a tonal center that shifts. Each 3-step cycle: IIm→V7→Imaj
+// Then tonal center shifts randomly by a 5th or other jazz motion
+function nextNodeFn(currentKey,mode,history){
+  const{root,type}=parseNid(currentKey);
   if(mode==='251'){
-    // Cycle: min→dom7(+5)→maj(-2)→min(+2)...
-    const cycle=[
-      [0,'min'],[7,'dom7'],[-2,'maj'],
-    ];
-    const h=history.length%3;
-    if(h===0)return nid(m(root,0),'min');
-    if(h===1)return nid(m(root,5),'dom7');
-    return nid(m(root,-7),'maj');
+    const step=history.length%3;
+    if(step===0) return nid(m12(root,2),'min');   // II: up a maj2 from tonic
+    if(step===1) return nid(m12(root,5),'dom7');  // V: up a 4th from II = 5th from tonic
+    // I: down a 5th from V = back to tonic, sometimes shift tonal center
+    const shift=[0,5,7,2,-2][Math.floor(Math.random()*5)];
+    return nid(m12(root,shift-7),'maj');
   }
-
   if(mode==='dom_chain'){
-    // dom7→dom7 down a fifth, or resolve to maj
-    if(type==='dom7'&&Math.random()>.35) return nid(m(root,5),'dom7');
-    return nid(m(root,-7),Math.random()>.4?'maj':'min');
+    if(type==='dom7'&&Math.random()>.3) return nid(m12(root,7),'dom7');
+    return nid(m12(root,5),Math.random()>.4?'maj':'min');
   }
-
   if(mode==='rel'){
-    // Toggle major↔minor relative
-    if(type==='maj') return nid(m(root,-3),'min');
-    if(type==='min') return nid(m(root,3),'maj');
+    if(type==='maj') return nid(m12(root,9),'min');
+    if(type==='min') return nid(m12(root,3),'maj');
     return nid(root,'maj');
   }
-
   if(mode==='modal'){
-    // Stay on same root, change quality; or move by half step
     const types=['maj','min','dom7','aug'];
     if(Math.random()>.5){
       const t=types.filter(t=>t!==type);
       return nid(root,t[Math.floor(Math.random()*t.length)]);
     }
-    const step=Math.random()>.5?1:-1;
-    return nid(m(root,step),type);
+    return nid(m12(root,Math.random()>.5?1:-1),type);
   }
-
   if(mode==='chromatic'){
-    // Half-step motion into a dom7, then resolve
-    if(type!=='dom7') return nid(m(root,1),'dom7');
-    return nid(m(root,-7),'maj');
+    if(type!=='dom7') return nid(m12(root,1),'dom7');
+    return nid(m12(root,5),'maj');
   }
-
-  // free: weighted random walk
-  return randomSuccessor(currentId)||nid(m(root,7),'dom7');
+  return randomSuccessor(currentKey)||nid(m12(root,7),'dom7');
 }
 
 // ═══════════════════════════════════════════════════════════
-// PROGRESSIONS (same as v3, trimmed)
+// PROGRESSIONS
 // ═══════════════════════════════════════════════════════════
 const PROGRESSIONS=[
-  {id:'cycle_maj', cat:'Cycle', name:'Cycle ↻ Majeur', chords:[0,7,2,9,4,11,6,1,8,3,10,5].map(r=>({root:r,type:'maj'}))},
-  {id:'cycle_dom7',cat:'Cycle', name:'Cycle ↻ Dom7',   chords:[0,7,2,9,4,11,6,1,8,3,10,5].map(r=>({root:r,type:'dom7'}))},
-  {id:'cycle_mix', cat:'Cycle', name:'Cycle ↻ Mixte',  chords:[0,7,2,9,4,11,6,1,8,3,10,5].map((r,i)=>({root:r,type:i%3===0?'dom7':i%3===1?'min':'maj'}))},
-  {id:'251_maj',   cat:'Jazz',  name:'II–V–I Majeur',  chords:[{root:2,type:'min7'},{root:7,type:'dom7'},{root:0,type:'maj7'}]},
-  {id:'anatole',   cat:'Jazz',  name:'Anatole',         chords:[{root:0,type:'maj'},{root:9,type:'min'},{root:2,type:'min'},{root:7,type:'dom7'}]},
-  {id:'coltrane',  cat:'Jazz',  name:'Coltrane Changes',chords:[{root:0,type:'maj7'},{root:4,type:'dom7'},{root:8,type:'maj7'},{root:0,type:'dom7'},{root:4,type:'maj7'},{root:8,type:'dom7'}]},
-  {id:'blues_12',  cat:'Blues', name:'Blues 12 mesures',chords:[
+  {id:'cycle_maj',  cat:'Cycle', name:'Cycle ↻ Majeur',    chords:FIFTHS_ORDER.map(r=>({root:r,type:'maj'}))},
+  {id:'cycle_dom7', cat:'Cycle', name:'Cycle ↻ Dom7',      chords:FIFTHS_ORDER.map(r=>({root:r,type:'dom7'}))},
+  {id:'cycle_min',  cat:'Cycle', name:'Cycle ↻ Mineur',    chords:FIFTHS_ORDER.map(r=>({root:r,type:'min'}))},
+  {id:'cycle_mix',  cat:'Cycle', name:'Cycle ↻ Mixte',     chords:FIFTHS_ORDER.map((r,i)=>({root:r,type:['dom7','min','maj'][i%3]}))},
+  {id:'251_maj',    cat:'Jazz',  name:'II–V–I Majeur (C)', chords:[{root:2,type:'min7'},{root:7,type:'dom7'},{root:0,type:'maj7'}]},
+  {id:'251_min',    cat:'Jazz',  name:'II–V–I Mineur (Am)',chords:[{root:2,type:'min7b5'},{root:7,type:'dom7'},{root:9,type:'min'}]},
+  {id:'anatole',    cat:'Jazz',  name:'Anatole (Rythm ch.)',chords:[{root:0,type:'maj'},{root:9,type:'min'},{root:2,type:'min'},{root:7,type:'dom7'}]},
+  {id:'coltrane',   cat:'Jazz',  name:'Coltrane Changes',  chords:[{root:0,type:'maj7'},{root:4,type:'dom7'},{root:8,type:'maj7'},{root:0,type:'dom7'},{root:4,type:'maj7'},{root:8,type:'dom7'}]},
+  {id:'giant_steps',cat:'Jazz',  name:'Giant Steps',       chords:[{root:0,type:'maj7'},{root:7,type:'dom7'},{root:4,type:'maj7'},{root:11,type:'dom7'},{root:8,type:'maj7'},{root:3,type:'dom7'}]},
+  {id:'blues_12',   cat:'Blues', name:'Blues 12 mesures',  chords:[
     {root:0,type:'dom7'},{root:0,type:'dom7'},{root:0,type:'dom7'},{root:0,type:'dom7'},
     {root:5,type:'dom7'},{root:5,type:'dom7'},{root:0,type:'dom7'},{root:0,type:'dom7'},
     {root:7,type:'dom7'},{root:5,type:'dom7'},{root:0,type:'dom7'},{root:7,type:'dom7'},
   ]},
-  {id:'modal_so',  cat:'Modal', name:'So What',         chords:[{root:2,type:'min'},{root:2,type:'min'},{root:3,type:'min'},{root:2,type:'min'}]},
-  {id:'pop_1456',  cat:'Pop',   name:'I–IV–V–VI',       chords:[{root:0,type:'maj'},{root:5,type:'maj'},{root:7,type:'maj'},{root:9,type:'min'}]},
-  {id:'andalusian',cat:'Pop',   name:'Cadence andalouse',chords:[{root:9,type:'min'},{root:7,type:'maj'},{root:5,type:'maj'},{root:4,type:'maj'}]},
+  {id:'jazz_blues', cat:'Blues', name:'Jazz Blues (F)',    chords:[
+    {root:5,type:'dom7'},{root:5,type:'dom7'},{root:5,type:'dom7'},{root:5,type:'dom7'},
+    {root:10,type:'dom7'},{root:10,type:'dom7'},{root:5,type:'dom7'},{root:5,type:'dom7'},
+    {root:0,type:'dom7'},{root:10,type:'dom7'},{root:5,type:'dom7'},{root:0,type:'dom7'},
+  ]},
+  {id:'so_what',    cat:'Modal', name:'So What',           chords:[{root:2,type:'min7'},{root:2,type:'min7'},{root:1,type:'min7'},{root:2,type:'min7'}]},
+  {id:'autumn',     cat:'Jazz',  name:'Autumn Leaves (Em)',chords:[{root:2,type:'min7'},{root:7,type:'dom7'},{root:0,type:'maj7'},{root:5,type:'maj7'},{root:11,type:'min7b5'},{root:4,type:'dom7'},{root:4,type:'min'}]},
+  {id:'andalusian', cat:'Pop',   name:'Cadence andalouse', chords:[{root:9,type:'min'},{root:7,type:'maj'},{root:5,type:'maj'},{root:4,type:'maj'}]},
+  {id:'1645',       cat:'Pop',   name:'I–VI–IV–V',         chords:[{root:0,type:'maj'},{root:9,type:'min'},{root:5,type:'maj'},{root:7,type:'maj'}]},
 ];
 
 // ═══════════════════════════════════════════════════════════
-// FFT CHORD DETECTION
+// FFT CHORD DETECTION — with dim7 disambiguation (BUG FIX #7)
 // ═══════════════════════════════════════════════════════════
 function buildChroma(fd,sr,fftSize){
   const c=new Float32Array(12).fill(0);
   const bHz=sr/fftSize;
-  const harmonicWeights=[1.0,0.5,0.33,0.25,0.2];
+  const hw=[1.0,0.5,0.33,0.25,0.2];
   for(let i=1;i<fd.length;i++){
     const freq=i*bHz;
-    if(freq<60||freq>4000)continue;
+    if(freq<60||freq>4200)continue;
     if(fd[i]<-90)continue;
     const amp=Math.pow(10,fd[i]/20);
     const midi=12*Math.log2(freq/440)+69;
-    const midiRound=Math.round(midi);
-    const tuneErr=Math.abs(midi-midiRound);
-    if(tuneErr>0.45)continue;
-    const pc=((midiRound%12)+12)%12;
-    const octave=Math.max(0,Math.floor(Math.log2(freq/260)));
-    const hw=harmonicWeights[Math.min(octave,harmonicWeights.length-1)];
-    c[pc]+=amp*hw;
+    const mr=Math.round(midi);
+    if(Math.abs(midi-mr)>0.45)continue;
+    const pc=((mr%12)+12)%12;
+    const oct=Math.max(0,Math.min(4,Math.floor(Math.log2(Math.max(freq,61)/260))));
+    c[pc]+=amp*hw[oct];
   }
   let mx=0;for(let i=0;i<12;i++)if(c[i]>mx)mx=c[i];
   if(mx<0.0001)return c;
@@ -343,322 +303,433 @@ function scoreChord(chroma,root,tmpl){
   return s/tmpl.length-(n>0?(p/n)*0.15:0);
 }
 function detectChord(chroma){
-  let totalEnergy=0;for(let i=0;i<12;i++)totalEnergy+=chroma[i];
-  if(totalEnergy<0.5)return null;
+  let totalE=0;for(let i=0;i<12;i++)totalE+=chroma[i];
+  if(totalE<0.5)return null;
   let best={root:0,type:'maj',score:-Infinity};
   for(let r=0;r<12;r++)for(const[t,f]of Object.entries(CHORD_FORMULAS)){
     const s=scoreChord(chroma,r,f);
     if(s>best.score)best={root:r,type:t,score:s};
   }
-  return best.score>0.08?best:null;
+  if(best.score<=0.08)return null;
+  // BUG FIX #7: dim7 has 4 symmetric roots — pick the one with highest chroma
+  if(best.type==='dim7'){
+    let maxC=0,bestRoot=best.root;
+    for(const o of[0,3,6,9]){
+      const r=((best.root+o)%12+12)%12;
+      if(chroma[r]>maxC){maxC=chroma[r];bestRoot=r;}
+    }
+    best={...best,root:bestRoot};
+  }
+  return best;
 }
 
 // ═══════════════════════════════════════════════════════════
-// AUDIO
+// AUDIO — Web Audio scheduled metronome (BUG FIX #6, no drift)
 // ═══════════════════════════════════════════════════════════
-function playClick(ctx,down,vol=.6){
+function playClick(ctx,isDown,vol,time){
   if(!ctx||ctx.state==='closed')return;
-  const t=ctx.currentTime;
   const o=ctx.createOscillator(),g=ctx.createGain();
-  o.type='triangle';o.frequency.value=down?1400:900;
-  g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+.035);
-  o.connect(g);g.connect(ctx.destination);o.start(t);o.stop(t+.04);
+  o.type='triangle';
+  o.frequency.value=isDown?1400:900;
+  g.gain.setValueAtTime(0,time);
+  g.gain.linearRampToValueAtTime(vol,time+0.002);
+  g.gain.exponentialRampToValueAtTime(0.001,time+0.04);
+  o.connect(g);g.connect(ctx.destination);
+  o.start(time);o.stop(time+0.045);
 }
 
 // ═══════════════════════════════════════════════════════════
 // SESSION STORAGE
 // ═══════════════════════════════════════════════════════════
-const SK='quintessence_v4';
+const SK='quintessence_v5';
 const loadSessions=()=>{try{return JSON.parse(localStorage.getItem(SK)||'[]');}catch{return[];}};
 const saveSess=s=>{try{const a=loadSessions();a.unshift({...s,id:Date.now(),date:new Date().toISOString()});localStorage.setItem(SK,JSON.stringify(a.slice(0,60)));}catch{}};
 const clearSess=()=>{try{localStorage.removeItem(SK);}catch{}};
 
 // ═══════════════════════════════════════════════════════════
-// HARMONIC NETWORK SVG COMPONENT
+// PIANO KEYBOARD COMPONENT
 // ═══════════════════════════════════════════════════════════
-const NetworkSVG=memo(({W,H,currentId,nextId,history,activeIds,noteStatus})=>{
-  const positions=useMemo(()=>computeLayout(W,H,1),[W,H]);
-  const nodeR=Math.min(W,H)*.038;
-  const fontSize=nodeR*.72;
+// 2 octaves: C3–B4 (24 notes + C5)
+// White keys: C D E F G A B × 2 + C = 15 white keys
+// Black keys: C# D# F# G# A# × 2 = 10 black keys
+const WHITE_NOTES=[0,2,4,5,7,9,11]; // C D E F G A B semitone offsets
+const BLACK_NOTES=[1,3,6,8,10];     // C# D# F# G# A#
 
-  const statusColor=noteStatus==='correct'?'#00E676':noteStatus==='wrong'?'#FF1744':'#FFB300';
+function PianoKeyboard({root,chordType,scaleKey,voicingMode='shell',W,compact=false}){
+  if(root==null)return null;
+  const H=compact?54:80;
+  const startOct=3; // C3
+  const numOctaves=2;
+  const totalWhite=numOctaves*7+1;
+  const ww=W/totalWhite;
+  const wh=H;
+  const bw=ww*.6;
+  const bh=H*.6;
 
-  // Draw edges for visible node pairs (only main 4 types)
-  const visibleEdges=useMemo(()=>{
-    const main=new Set(NETWORK.nodes.map(n=>n.id));
-    return NETWORK.edges.filter(e=>main.has(e.from)&&main.has(e.to)&&e.weight<=2);
-  },[]);
+  const flat=usesFlat(root);
+  const scaleFormula=SCALES[scaleKey]?.formula||[];
+  const tensions=CHORD_TENSIONS[chordType]||{chord:[],color:[],avoid:[]};
+  const voicing=VOICINGS[chordType];
+  const voicingNotes=voicingMode==='shell'?voicing?.shell:voicing?.rootless;
 
-  // Currently highlighted path (last N history nodes)
-  const histSet=new Set(history.slice(-6));
+  function classifyNote(pc){
+    const rel=((pc-root)+12)%12;
+    if(rel===0)return'root';
+    if(tensions.chord.includes(rel))return'chord';
+    if(voicingNotes&&voicingNotes.map(v=>((v)%12+12)%12).includes(rel))return'voicing';
+    if(tensions.color.includes(rel))return'color';
+    if(tensions.avoid.includes(rel))return'avoid';
+    if(scaleFormula.includes(rel))return'scale';
+    return'outside';
+  }
+
+  const KEY_STYLE={
+    root:   {fill:'#FFB300', stroke:'#FF8800', glow:'#FFB300'},
+    chord:  {fill:'#FF4D8D', stroke:'#DD2266', glow:'#FF4D8D'},
+    voicing:{fill:'#E040FB', stroke:'#AA00CC', glow:'#E040FB'},
+    color:  {fill:'#00C97A', stroke:'#008855', glow:'#00C97A'},
+    avoid:  {fill:'#1a0808', stroke:'#440000', glow:null},
+    scale:  {fill:'#1a1a2e', stroke:'#2a2a4e', glow:null},
+    outside:{fill:'#0a0a12', stroke:'#141420', glow:null},
+  };
+  const BLACK_STYLE={
+    root:   {fill:'#FFB300', stroke:'#FF8800'},
+    chord:  {fill:'#FF4D8D', stroke:'#DD2266'},
+    voicing:{fill:'#E040FB', stroke:'#AA00CC'},
+    color:  {fill:'#00C97A', stroke:'#008855'},
+    avoid:  {fill:'#1a0808', stroke:'#550000'},
+    scale:  {fill:'#1a1a2e', stroke:'#252540'},
+    outside:{fill:'#0a0a0f', stroke:'#0e0e18'},
+  };
+
+  // Build white key positions
+  const whites=[];
+  let wx=0;
+  for(let oct=0;oct<numOctaves;oct++){
+    for(const offset of WHITE_NOTES){
+      const pc=((startOct+oct)*12+offset)%12;
+      const cls=classifyNote(pc);
+      const s=KEY_STYLE[cls];
+      whites.push({x:wx,pc,cls,s});
+      wx+=ww;
+    }
+  }
+  // Add final C
+  const lastPc=(startOct+numOctaves)*12%12;
+  whites.push({x:wx,pc:0,cls:classifyNote(0),s:KEY_STYLE[classifyNote(0)]});
+
+  // Black key positions
+  const blacks=[];
+  const blackOffsetsInOct=[1,2,null,4,5,6,null]; // after each white key
+  wx=0;
+  for(let oct=0;oct<numOctaves;oct++){
+    for(let wi=0;wi<7;wi++){
+      const offset=[1,3,null,6,8,10,null][wi];
+      if(offset!==null){
+        const pc=((startOct+oct)*12+offset)%12;
+        const cls=classifyNote(pc);
+        const s=BLACK_STYLE[cls];
+        blacks.push({x:wx+ww-bw/2,pc,cls,s});
+      }
+      wx+=ww;
+    }
+  }
 
   return(
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{position:'absolute',inset:0}}>
+    <svg width={W} height={H+4} style={{display:'block',overflow:'visible'}}>
       <defs>
-        <radialGradient id="nbg" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#0e0a18"/>
-          <stop offset="100%" stopColor="#060608"/>
-        </radialGradient>
-        <filter id="ng" x="-60%" y="-60%" width="220%" height="220%">
-          <feGaussianBlur stdDeviation="5" result="b"/>
-          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter>
-        <filter id="ngs" x="-80%" y="-80%" width="260%" height="260%">
-          <feGaussianBlur stdDeviation="10" result="b"/>
-          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter>
-        <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-          <path d="M0,0 L6,3 L0,6 Z" fill="#ffffff18"/>
-        </marker>
-        <marker id="arr_hi" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-          <path d="M0,0 L6,3 L0,6 Z" fill="#FFB30066"/>
-        </marker>
-        {['maj','min','dom7','aug'].map(type=>(
-          <radialGradient key={type} id={`gr_${type}`} cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor={Q[type].color} stopOpacity="0.9"/>
-            <stop offset="100%" stopColor={Q[type].color} stopOpacity="0.5"/>
-          </radialGradient>
+        {Object.entries(KEY_STYLE).filter(([,s])=>s.glow).map(([cls,s])=>(
+          <filter key={cls} id={`pk_${cls}`} x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="3" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
         ))}
       </defs>
-
-      {/* Background */}
-      <rect width={W} height={H} fill="url(#nbg)"/>
-
-      {/* Subtle ring guides */}
-      {['.10','.19','.28','.38'].map((r,i)=>(
-        <circle key={i} cx={W/2} cy={H/2} r={+r*Math.min(W,H)}
-          fill="none" stroke="#ffffff06" strokeWidth="1" strokeDasharray="3,8"/>
+      {/* White keys */}
+      {whites.map((k,i)=>(
+        <g key={i}>
+          {k.s.glow&&<rect x={k.x+1} y={1} width={ww-2} height={wh-2}
+            rx={3} fill={k.s.glow+'33'} style={{filter:`url(#pk_${k.cls})`}}/>}
+          <rect x={k.x+0.5} y={0.5} width={ww-1} height={wh-1}
+            rx={3} fill={k.s.fill} stroke={k.s.stroke} strokeWidth="0.5"/>
+          {k.cls==='avoid'&&!compact&&(
+            <text x={k.x+ww/2} y={wh-8} textAnchor="middle" fontSize={7} fill="#8a2020">⚠</text>
+          )}
+          {(k.cls==='root'||k.cls==='chord'||k.cls==='color'||k.cls==='voicing')&&!compact&&(
+            <text x={k.x+ww/2} y={wh-6} textAnchor="middle" fontSize={compact?6:8}
+              fill={k.cls==='root'?'#4a2800':k.cls==='chord'?'#2a0018':k.cls==='voicing'?'#1a0025':'#003320'}
+              fontFamily="Georgia,serif" fontWeight="700">
+              {nn(k.pc,flat)}
+            </text>
+          )}
+        </g>
       ))}
-
-      {/* Center label */}
-      <text x={W/2} y={H/2+4} textAnchor="middle" dominantBaseline="middle"
-        fontSize={nodeR*.6} fill="#ffffff08" fontFamily="Georgia,serif" letterSpacing="3">
-        RÉSEAU
-      </text>
-
-      {/* Edges */}
-      {visibleEdges.map((e,i)=>{
-        const fp=positions[e.from];const tp=positions[e.to];
-        if(!fp||!tp)return null;
-        const isActive=(e.from===currentId&&e.to===nextId)||(histSet.has(e.from)&&histSet.has(e.to));
-        const dx=tp.x-fp.x,dy=tp.y-fp.y;
-        const len=Math.sqrt(dx*dx+dy*dy);
-        const ux=dx/len,uy=dy/len;
-        const sx=fp.x+ux*nodeR,sy=fp.y+uy*nodeR;
-        const ex=tp.x-ux*(nodeR+5),ey=tp.y-uy*(nodeR+5);
-        return(
-          <line key={i} x1={sx} y1={sy} x2={ex} y2={ey}
-            stroke={isActive?'#FFB30055':'#ffffff08'}
-            strokeWidth={isActive?1.5:.5}
-            markerEnd={isActive?'url(#arr_hi)':'url(#arr)'}
-            strokeDasharray={e.weight===2?'4,4':'none'}
-          />
-        );
-      })}
-
-      {/* History trail */}
-      {history.slice(-5).map((hid,i,arr)=>{
-        if(i===0)return null;
-        const fp=positions[arr[i-1]];const tp=positions[hid];
-        if(!fp||!tp)return null;
-        const alpha=i/arr.length;
-        return(
-          <line key={`trail_${i}`} x1={fp.x} y1={fp.y} x2={tp.x} y2={tp.y}
-            stroke={`rgba(255,179,0,${alpha*.4})`} strokeWidth={alpha*3}
-            strokeLinecap="round"/>
-        );
-      })}
-
-      {/* Nodes */}
-      {NETWORK.nodes.map(node=>{
-        const pos=positions[node.id];
-        if(!pos)return null;
-        const isCur=node.id===currentId;
-        const isNxt=node.id===nextId&&node.id!==currentId;
-        const inHist=histSet.has(node.id)&&!isCur;
-        const isActive=activeIds?.has(node.id);
-        const q=Q[node.type];
-        const flat=[1,3,5,6,8,10].includes(node.root);
-        const label=chordName(node.root,node.type,flat);
-        const r=isCur?nodeR*1.35:isNxt?nodeR*1.15:nodeR;
-
-        return(
-          <g key={node.id} style={{transition:'all .15s'}}>
-            {/* Glow ring for current */}
-            {isCur&&(
-              <circle cx={pos.x} cy={pos.y} r={r*1.6}
-                fill={q.color+'15'} stroke={q.color+'44'} strokeWidth="1"
-                style={{filter:'url(#ngs)'}}
-              />
-            )}
-            {isNxt&&(
-              <circle cx={pos.x} cy={pos.y} r={r*1.4}
-                fill="none" stroke={q.color+'33'} strokeWidth="1"
-                strokeDasharray="3,3"
-              />
-            )}
-            {/* Node circle */}
-            <circle cx={pos.x} cy={pos.y} r={r}
-              fill={isCur?`url(#gr_${node.type})`:isNxt?q.color+'55':inHist?q.color+'33':isActive?q.color+'20':'#0e0e18'}
-              stroke={isCur?q.color:isNxt?q.color+'aa':inHist?q.color+'66':isActive?q.color+'44':'#1e1e28'}
-              strokeWidth={isCur?2:isNxt?1.5:.5}
-              style={{filter:isCur?'url(#ng)':'none',transition:'all .15s'}}
-            />
-            {/* Label */}
-            <text x={pos.x} y={pos.y} textAnchor="middle" dominantBaseline="middle"
-              fontSize={isCur?fontSize*1.15:isNxt?fontSize*1.05:fontSize*.88}
-              fontWeight={isCur?700:isNxt?500:300}
-              fill={isCur?'#fff':isNxt?q.textColor:isActive?q.color+'cc':'#2a2a3a'}
-              fontFamily="Georgia,serif"
-              style={{filter:isCur?'url(#ng)':'none',pointerEvents:'none',transition:'all .15s'}}
-            >{label}</text>
-          </g>
-        );
-      })}
-
-      {/* Status overlay on current */}
-      {currentId&&positions[currentId]&&noteStatus!=='idle'&&(
-        <text
-          x={positions[currentId].x}
-          y={positions[currentId].y+nodeR*1.9}
-          textAnchor="middle" fontSize={nodeR*.55}
-          fill={statusColor} fontFamily="Georgia,serif"
-          style={{filter:'url(#ng)'}}
-        >{noteStatus==='correct'?'✓':noteStatus==='wrong'?'✗':'♩'}</text>
-      )}
-    </svg>
-  );
-});
-
-// ═══════════════════════════════════════════════════════════
-// CIRCLE OF FIFTHS SVG
-// ═══════════════════════════════════════════════════════════
-const FIFTHS_MAJ_LABELS=['C','G','D','A','E','B','F♯','D♭','A♭','E♭','B♭','F'];
-const FIFTHS_MIN_LABELS=['Am','Em','Bm','F♯m','C♯m','G♯m','D♯m','B♭m','Fm','Cm','Gm','Dm'];
-const CIRCLE_COLORS=['#FFB300','#FF6D00','#E040FB','#00BCD4','#76FF03','#FF4081','#40C4FF','#FFEA00','#69F0AE','#FF6E40','#EA80FC','#1DE9B6'];
-
-function CircleSVG({W,H,currentRoot,currentType,nextRoot,activeRoots,noteStatus}){
-  const size=Math.min(W,H)*.88;
-  const cx=W/2,cy=H/2;
-  const outerR=size*.43,midR=size*.315,innerR=size*.21;
-  const outerL=size*.37,innerL=size*.265;
-  const statusColor=noteStatus==='correct'?'#00E676':noteStatus==='wrong'?'#FF1744':'#FFB300';
-  const qColor=currentType?Q[currentType]?.color??'#FFB300':'#FFB300';
-
-  return(
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{position:'absolute',inset:0,overflow:'visible'}}>
-      <defs>
-        <radialGradient id="cbg" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#12101e"/><stop offset="100%" stopColor="#060608"/>
-        </radialGradient>
-        <filter id="cglow" x="-40%" y="-40%" width="180%" height="180%">
-          <feGaussianBlur stdDeviation="4" result="b"/>
-          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter>
-        <filter id="csglow" x="-80%" y="-80%" width="260%" height="260%">
-          <feGaussianBlur stdDeviation="9" result="b"/>
-          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter>
-      </defs>
-      <circle cx={cx} cy={cy} r={outerR+size*.05} fill="url(#cbg)" stroke="#101020" strokeWidth="1"/>
-
-      {FIFTHS_ORDER.map((root,i)=>{
-        const a0=(i*30-90)*Math.PI/180,a1=((i+1)*30-90)*Math.PI/180;
-        const mid=(i*30+15-90)*Math.PI/180;
-        const col=CIRCLE_COLORS[i];
-        const isCur=root===currentRoot;
-        const isNxt=root===nextRoot&&root!==currentRoot;
-        const inAct=activeRoots?.has(root);
-        const P=(r,a)=>[cx+r*Math.cos(a),cy+r*Math.sin(a)];
-        const [x1o,y1o]=P(outerR,a0),[x2o,y2o]=P(outerR,a1);
-        const [x1m,y1m]=P(midR,a0), [x2m,y2m]=P(midR,a1);
-        const [x1n,y1n]=P(innerR,a0),[x2n,y2n]=P(innerR,a1);
-        const op=`M${x1m} ${y1m} L${x1o} ${y1o} A${outerR} ${outerR} 0 0 1 ${x2o} ${y2o} L${x2m} ${y2m} A${midR} ${midR} 0 0 0 ${x1m} ${y1m}`;
-        const ip=`M${x1n} ${y1n} L${x1m} ${y1m} A${midR} ${midR} 0 0 1 ${x2m} ${y2m} L${x2n} ${y2n} A${innerR} ${innerR} 0 0 0 ${x1n} ${y1n}`;
-        const [lx,ly]=P(outerL,mid),[mx,my]=P(innerL,mid);
-        return(
-          <g key={i}>
-            <path d={op} fill={isCur?col+'ee':isNxt?col+'44':inAct?col+'22':'#0c0c1a'}
-              stroke={isCur?col:inAct?col+'55':'#181828'} strokeWidth={isCur?2:.5}
-              style={{filter:isCur?'url(#cglow)':'none',transition:'all .15s'}}/>
-            <path d={ip} fill={isCur?col+'66':inAct?col+'18':'#08080f'}
-              stroke={isCur?col+'aa':inAct?col+'33':'#121220'} strokeWidth={isCur?1:.5}
-              style={{transition:'all .15s'}}/>
-            <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
-              fontSize={isCur?size*.046:size*.034} fontWeight={isCur?700:inAct?500:300}
-              fill={isCur?'#fff':isNxt?'#bbb':inAct?col:'#2a2a3e'}
-              style={{filter:isCur?'url(#cglow)':'none',transition:'fill .15s'}}
-              fontFamily="Georgia,serif">{FIFTHS_MAJ_LABELS[i]}</text>
-            <text x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
-              fontSize={isCur?size*.028:size*.022} fontWeight={isCur?600:300}
-              fill={isCur?'#8ecba8':inAct?col+'77':'#1e1e30'}
-              fontFamily="Georgia,serif">{FIFTHS_MIN_LABELS[i]}</text>
-          </g>
-        );
-      })}
-
-      <circle cx={cx} cy={cy} r={innerR-size*.012} fill="#060608" stroke="#141428" strokeWidth="1"/>
-      {currentRoot!=null&&noteStatus!=='idle'&&<>
-        <circle cx={cx} cy={cy} r={innerR-size*.016} fill="none"
-          stroke={qColor} strokeWidth="1.5" strokeOpacity=".4"
-          style={{filter:'url(#csglow)'}}/>
-        <text x={cx} y={cy-size*.028} textAnchor="middle" dominantBaseline="middle"
-          fontSize={size*.082} fontWeight={200}
-          fill={qColor} fontFamily="Georgia,serif"
-          style={{filter:noteStatus==='correct'?'url(#csglow)':'none',transition:'fill .15s'}}>
-          {currentRoot!=null?chordName(currentRoot,currentType??'maj'):'—'}
-        </text>
-        <text x={cx} y={cy+size*.055} textAnchor="middle" dominantBaseline="middle"
-          fontSize={size*.024} fill={qColor+'99'} letterSpacing="2" fontFamily="Georgia,serif">
-          {noteStatus==='correct'?'CORRECT':noteStatus==='wrong'?'RATÉ':'ÉCOUTE'}
-        </text>
-      </>}
-      {(currentRoot==null||noteStatus==='idle')&&(
-        <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle"
-          fontSize={size*.026} fill="#1e1e30" letterSpacing="3" fontFamily="Georgia,serif">
-          QUINTESSENCE
-        </text>
+      {/* Black keys */}
+      {blacks.map((k,i)=>(
+        <g key={i}>
+          {k.s.glow&&<rect x={k.x+0.5} y={0.5} width={bw} height={bh}
+            rx={2} fill={k.s.glow+'44'} style={{filter:`url(#pk_${k.cls})`}}/>}
+          <rect x={k.x+0.5} y={0.5} width={bw-1} height={bh-1}
+            rx={2} fill={k.s.fill} stroke={k.s.stroke} strokeWidth="0.5"/>
+        </g>
+      ))}
+      {/* Legend bar */}
+      {!compact&&(
+        <g transform={`translate(0,${H+1})`}>
+          {[
+            ['root','Fondamentale','#FFB300'],
+            ['chord','Accord','#FF4D8D'],
+            ['voicing','Voicing','#E040FB'],
+            ['color','Tension','#00C97A'],
+            ['avoid','Éviter','#FF4444'],
+          ].map(([cls,label,col],i)=>(
+            <g key={cls} transform={`translate(${i*(W/5)},0)`}>
+              <rect width={8} height={8} rx={2} fill={col+'55'} stroke={col} strokeWidth="0.5"/>
+              <text x={10} y={7} fontSize={7} fill={col+'99'}>{label}</text>
+            </g>
+          ))}
+        </g>
       )}
     </svg>
   );
 }
 
 // ═══════════════════════════════════════════════════════════
-// SCALE PILLS
+// FULL PIANO VIEW — 3 octaves, large, immersive
 // ═══════════════════════════════════════════════════════════
-function ScalePills({root,type,scaleIdx,onCycle}){
+function FullPianoView({W,H,root,chordType,scaleKey,voicingMode,onVoicingChange,scaleIdx,onScaleCycle,scales,currentChordName,noteStatus}){
+  if(root==null)return(
+    <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{fontSize:14,color:'#2a2a3a',letterSpacing:4,fontFamily:'Georgia,serif'}}>
+        ACTIVEZ LE MICRO POUR COMMENCER
+      </div>
+    </div>
+  );
+
+  const numOctaves=3;
+  const totalWhite=numOctaves*7+1;
+  const padH=H*.12;
+  const pianoH=H*.62;
+  const pianoW=W*.94;
+  const pianoX=(W-pianoW)/2;
+  const ww=pianoW/totalWhite;
+  const bw=ww*.62;
+  const bh=pianoH*.62;
+
+  const flat=usesFlat(root);
+  const scaleFormula=SCALES[scaleKey]?.formula||[];
+  const tensions=CHORD_TENSIONS[chordType]||{chord:[],color:[],avoid:[]};
+  const voicing=VOICINGS[chordType];
+  const voicingNotes=voicingMode==='shell'?voicing?.shell:voicing?.rootless;
+
+  function classifyNote(pc){
+    const rel=((pc-root)+12)%12;
+    if(rel===0)return'root';
+    if(tensions.chord.includes(rel))return'chord';
+    if(voicingNotes&&voicingNotes.map(v=>v%12).includes(rel))return'voicing';
+    if(tensions.color.includes(rel))return'color';
+    if(tensions.avoid.includes(rel))return'avoid';
+    if(scaleFormula.includes(rel))return'scale';
+    return'outside';
+  }
+
+  const KEY_COL={
+    root:   '#FFB300',chord:  '#FF4D8D',voicing:'#E040FB',
+    color:  '#00C97A',avoid:  '#2a0808',scale:  '#181830',outside:'#0c0c18',
+  };
+  const KEY_STR={
+    root:'#FF8800',chord:'#CC1155',voicing:'#9900BB',
+    color:'#007744',avoid:'#550000',scale:'#1e1e3a',outside:'#0e0e20',
+  };
+  const BKEY_COL={...KEY_COL,scale:'#0e0e22',outside:'#060610'};
+  const BKEY_STR={...KEY_STR,scale:'#181830',outside:'#0a0a18'};
+
+  // Start from C2 for 3 octaves
+  const startOct=2;
+  const whites=[],blacks=[];
+  let wx=0;
+  for(let oct=0;oct<numOctaves;oct++){
+    for(const offset of WHITE_NOTES){
+      const pc=((startOct+oct)*12+offset)%12;
+      const cls=classifyNote(pc);
+      whites.push({x:wx,pc,cls,note:nn(pc,flat)});
+      wx+=ww;
+    }
+  }
+  whites.push({x:wx,pc:0,cls:classifyNote(0),note:nn(0,flat)});
+  wx=0;
+  for(let oct=0;oct<numOctaves;oct++){
+    for(let wi=0;wi<7;wi++){
+      const offset=[1,3,null,6,8,10,null][wi];
+      if(offset!==null){
+        const pc=((startOct+oct)*12+offset)%12;
+        const cls=classifyNote(pc);
+        blacks.push({x:wx+ww-bw/2,pc,cls,note:nn(pc,flat)});
+      }
+      wx+=ww;
+    }
+  }
+
+  const qCol=Q[chordType]?.color||'#FFB300';
+  const statusColor=noteStatus==='correct'?'#00E676':noteStatus==='wrong'?'#FF1744':'#FFB300';
+
+  return(
+    <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'space-around',
+      padding:'12px 0'}}>
+
+      {/* Chord name */}
+      <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+        <div style={{fontSize:7,letterSpacing:5,color:'#2a2a3a'}}>ACCORD</div>
+        <div style={{fontSize:H*.1,fontWeight:200,color:qCol,fontFamily:'Georgia,serif',lineHeight:1,
+          textShadow:`0 0 40px ${qCol}66`}}>
+          {currentChordName}
+        </div>
+        <div style={{fontSize:13,color:qCol+'88',letterSpacing:2}}>{Q[chordType]?.label}</div>
+        {noteStatus!=='idle'&&(
+          <div style={{fontSize:11,color:statusColor,letterSpacing:3,marginTop:2}}>
+            {noteStatus==='correct'?'✓ CORRECT':noteStatus==='wrong'?'✗ RATÉ':'♩ ÉCOUTE'}
+          </div>
+        )}
+      </div>
+
+      {/* The piano SVG */}
+      <svg width={pianoW} height={pianoH+30} style={{overflow:'visible'}}>
+        <defs>
+          {['root','chord','voicing','color'].map(cls=>(
+            <filter key={cls} id={`fp_${cls}`} x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="4" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          ))}
+        </defs>
+        {/* White keys */}
+        {whites.map((k,i)=>{
+          const glow=['root','chord','voicing','color'].includes(k.cls);
+          return(
+            <g key={i}>
+              {glow&&<rect x={k.x+2} y={2} width={ww-4} height={pianoH-4} rx={6}
+                fill={KEY_COL[k.cls]+'44'} style={{filter:`url(#fp_${k.cls})`}}/>}
+              <rect x={k.x+0.5} y={0.5} width={ww-1} height={pianoH-1} rx={6}
+                fill={KEY_COL[k.cls]} stroke={KEY_STR[k.cls]} strokeWidth="0.5"/>
+              {k.cls==='avoid'&&(
+                <text x={k.x+ww/2} y={pianoH-16} textAnchor="middle" fontSize={11} fill="#cc2222">⚠</text>
+              )}
+              <text x={k.x+ww/2} y={pianoH-6} textAnchor="middle" fontSize={ww*.28} fontFamily="Georgia,serif"
+                fontWeight={k.cls==='root'?700:500}
+                fill={['root','chord','voicing','color'].includes(k.cls)?'#0a0a0a':'#1a1a2a'}>
+                {k.note}
+              </text>
+              {k.cls==='root'&&(
+                <circle cx={k.x+ww/2} cy={pianoH*.25} r={ww*.18}
+                  fill="#4a2800" stroke="#FFB300" strokeWidth="1"/>
+              )}
+            </g>
+          );
+        })}
+        {/* Black keys */}
+        {blacks.map((k,i)=>{
+          const glow=['root','chord','voicing','color'].includes(k.cls);
+          return(
+            <g key={i}>
+              {glow&&<rect x={k.x+1} y={1} width={bw-2} height={bh-2} rx={4}
+                fill={BKEY_COL[k.cls]+'55'} style={{filter:`url(#fp_${k.cls})`}}/>}
+              <rect x={k.x+0.5} y={0.5} width={bw-1} height={bh-1} rx={4}
+                fill={BKEY_COL[k.cls]} stroke={BKEY_STR[k.cls]} strokeWidth="0.5"/>
+              {(k.cls==='root'||k.cls==='chord'||k.cls==='color'||k.cls==='voicing')&&(
+                <text x={k.x+bw/2} y={bh-5} textAnchor="middle" fontSize={bw*.28}
+                  fill="#0a0a0a" fontFamily="Georgia,serif">{k.note}</text>
+              )}
+            </g>
+          );
+        })}
+        {/* Octave markers */}
+        {[0,1,2].map(oct=>(
+          <text key={oct} x={(oct*7+3.5)*ww} y={pianoH+20} textAnchor="middle"
+            fontSize={9} fill="#2a2a3a" fontFamily="Georgia,serif">
+            {['C3','C4','C5'][oct]}
+          </text>
+        ))}
+      </svg>
+
+      {/* Legend + scale pills */}
+      <div style={{width:pianoW,display:'flex',flexDirection:'column',gap:8}}>
+        {/* Color legend */}
+        <div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap'}}>
+          {[['root','#FFB300','Fondamentale'],['chord','#FF4D8D','Notes accord'],
+            ['voicing','#E040FB','Voicing'],['color','#00C97A','Tensions'],
+            ['avoid','#FF4444','À éviter']].map(([cls,col,lbl])=>(
+            <div key={cls} style={{display:'flex',alignItems:'center',gap:4}}>
+              <div style={{width:10,height:10,borderRadius:2,background:col+'55',border:`1px solid ${col}`}}/>
+              <span style={{fontSize:9,color:col+'99'}}>{lbl}</span>
+            </div>
+          ))}
+        </div>
+        {/* Scale & voicing selectors */}
+        <div style={{display:'flex',gap:10,justifyContent:'center',alignItems:'center',flexWrap:'wrap'}}>
+          <ScalePills root={root} type={chordType} scaleIdx={scaleIdx}
+            onCycle={onScaleCycle} compact={true}/>
+          <div style={{display:'flex',gap:4}}>
+            {[['shell','Shell'],['rootless','Rootless']].map(([v,l])=>(
+              <button key={v} onClick={()=>onVoicingChange(v)}
+                style={{padding:'3px 9px',borderRadius:6,fontSize:9,
+                  background:voicingMode===v?'rgba(224,64,251,.15)':'rgba(255,255,255,.03)',
+                  border:voicingMode===v?'1px solid #E040FB55':'1px solid #141420',
+                  color:voicingMode===v?'#E040FB':'#2a2a3a',cursor:'pointer'}}>{l}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// SCALE PILLS with tension classification
+// ═══════════════════════════════════════════════════════════
+function ScalePills({root,type,scaleIdx,onCycle,compact=false}){
   const keys=CHORD_SCALES[type]||['ionian'];
   const idx=Math.min(scaleIdx,keys.length-1);
   const sk=keys[idx];
   const si=SCALES[sk];
   if(!si)return null;
-  const flat=[1,3,5,6,8,10].includes(root);
-  const notes=scaleNotes(root,sk,flat);
-  const formula=si.formula||[];
+  const flat=usesFlat(root);
+  const formula=si.formula;
+  const tensions=CHORD_TENSIONS[type]||{chord:[],color:[],avoid:[]};
+
   return(
-    <div style={{display:'flex',flexDirection:'column',gap:5}}>
+    <div style={{display:'flex',flexDirection:'column',gap:compact?3:5}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-        <div style={{fontSize:11,color:si.color,fontWeight:600}}>{si.name}</div>
+        <div style={{fontSize:compact?9:11,color:si.color,fontWeight:600}}>{si.name}</div>
         {keys.length>1&&(
           <button onClick={onCycle}
             style={{padding:'2px 8px',borderRadius:6,background:'rgba(255,255,255,.05)',
-              border:'1px solid #1e1e2e',color:'#555',fontSize:9,cursor:'pointer',letterSpacing:1}}>
+              border:'1px solid #1e1e2e',color:'#555',fontSize:8,cursor:'pointer',letterSpacing:1}}>
             {idx+1}/{keys.length} →
           </button>
         )}
       </div>
-      <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-        {notes.map((n,i)=>{
-          const isRoot=i===0;
-          const isCT=CHORD_FORMULAS[type]?.includes?.(formula[i])||false;
+      <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+        {formula.map((interval,i)=>{
+          const notePc=((root+interval)%12+12)%12;
+          const noteName=nn(notePc,flat);
+          const isRoot=interval===0;
+          const isCT=tensions.chord.includes(interval)&&!isRoot;
+          const isColor=tensions.color.includes(interval);
+          const isAvoid=tensions.avoid.includes(interval);
+          const bg=isRoot?si.color+'2a':isCT?'#FF4D8D1a':isColor?'#00C97A1a':isAvoid?'#FF17441a':'rgba(255,255,255,.03)';
+          const border=isRoot?si.color:isCT?'#FF4D8D55':isColor?'#00C97A55':isAvoid?'#FF174455':'#1a1a28';
+          const col=isRoot?si.color:isCT?'#FF4D8Dcc':isColor?'#00C97Acc':isAvoid?'#FF4444':'#3a3a4a';
           return(
-            <div key={i} style={{
-              padding:'3px 8px',borderRadius:6,fontSize:12,fontFamily:'Georgia,serif',
-              background:isRoot?si.color+'2a':isCT?si.color+'14':'rgba(255,255,255,.04)',
-              border:`1px solid ${isRoot?si.color:isCT?si.color+'44':'#1a1a28'}`,
-              color:isRoot?si.color:isCT?si.color+'cc':'#3a3a4a',
-              fontWeight:isRoot?700:isCT?500:300,
-            }}>{n}</div>
+            <div key={i} title={isAvoid?'Note à éviter':isColor?'Tension':isCT?'Note d\'accord':''} style={{
+              padding:compact?'2px 5px':'3px 7px',borderRadius:5,
+              fontSize:compact?10:12,fontFamily:'Georgia,serif',
+              background:bg,border:`1px solid ${border}`,color:col,
+              fontWeight:isRoot?700:isCT?600:400,
+              position:'relative',
+            }}>
+              {noteName}
+              {isAvoid&&<span style={{position:'absolute',top:-4,right:-3,fontSize:6,color:'#FF4444'}}>⚠</span>}
+            </div>
           );
         })}
       </div>
@@ -667,38 +738,231 @@ function ScalePills({root,type,scaleIdx,onCycle}){
 }
 
 // ═══════════════════════════════════════════════════════════
+// CIRCLE SVG
+// ═══════════════════════════════════════════════════════════
+function CircleSVG({W,H,currentRoot,currentType,nextRoot,activeRoots,noteStatus}){
+  const sz=Math.min(W,H)*.88;
+  const cx=W/2,cy=H/2;
+  const oR=sz*.43,mR=sz*.315,iR=sz*.21;
+  const qCol=currentType?Q[currentType]?.color:'#FFB300';
+  const statusColor=noteStatus==='correct'?'#00E676':noteStatus==='wrong'?'#FF1744':'#FFB300';
+  return(
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{position:'absolute',inset:0,overflow:'visible'}}>
+      <defs>
+        <radialGradient id="cbg" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#12101e"/><stop offset="100%" stopColor="#060608"/>
+        </radialGradient>
+        <filter id="cg" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="4" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="csg" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="9" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <circle cx={cx} cy={cy} r={oR+sz*.05} fill="url(#cbg)" stroke="#101020" strokeWidth="1"/>
+      {FIFTHS_ORDER.map((root,i)=>{
+        const a0=(i*30-90)*Math.PI/180,a1=((i+1)*30-90)*Math.PI/180,mid=(i*30+15-90)*Math.PI/180;
+        const col=CIRCLE_COLORS[i];
+        const isCur=root===currentRoot;
+        const isNxt=root===nextRoot&&!isCur;
+        const inAct=activeRoots?.has(root);
+        const P=(r,a)=>[cx+r*Math.cos(a),cy+r*Math.sin(a)];
+        const[x1o,y1o]=P(oR,a0),[x2o,y2o]=P(oR,a1);
+        const[x1m,y1m]=P(mR,a0),[x2m,y2m]=P(mR,a1);
+        const[x1n,y1n]=P(iR,a0),[x2n,y2n]=P(iR,a1);
+        const op=`M${x1m} ${y1m} L${x1o} ${y1o} A${oR} ${oR} 0 0 1 ${x2o} ${y2o} L${x2m} ${y2m} A${mR} ${mR} 0 0 0 ${x1m} ${y1m}`;
+        const ip=`M${x1n} ${y1n} L${x1m} ${y1m} A${mR} ${mR} 0 0 1 ${x2m} ${y2m} L${x2n} ${y2n} A${iR} ${iR} 0 0 0 ${x1n} ${y1n}`;
+        const[lx,ly]=P(sz*.37,mid),[mx,my]=P(sz*.265,mid);
+        return(
+          <g key={i}>
+            <path d={op} fill={isCur?col+'ee':isNxt?col+'55':inAct?col+'22':'#0c0c1a'}
+              stroke={isCur?col:inAct?col+'44':'#181828'} strokeWidth={isCur?2:.5}
+              style={{filter:isCur?'url(#cg)':'none',transition:'all .15s'}}/>
+            <path d={ip} fill={isCur?col+'66':inAct?col+'18':'#08080f'}
+              stroke={isCur?col+'aa':inAct?col+'33':'#121220'} strokeWidth={isCur?1:.5}
+              style={{transition:'all .15s'}}/>
+            <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
+              fontSize={isCur?sz*.046:sz*.034} fontWeight={isCur?700:inAct?500:300}
+              fill={isCur?'#fff':isNxt?'#888':inAct?col:'#2a2a3e'}
+              style={{filter:isCur?'url(#cg)':'none',transition:'fill .15s',pointerEvents:'none'}}
+              fontFamily="Georgia,serif">{FIFTHS_MAJ_LABELS[i]}</text>
+            <text x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
+              fontSize={isCur?sz*.028:sz*.022} fontWeight={isCur?600:300}
+              fill={isCur?'#8ecba8':inAct?col+'77':'#1e1e30'}
+              style={{pointerEvents:'none'}} fontFamily="Georgia,serif">{FIFTHS_MIN_LABELS[i]}</text>
+          </g>
+        );
+      })}
+      <circle cx={cx} cy={cy} r={iR-sz*.012} fill="#060608" stroke="#141428" strokeWidth="1"/>
+      {currentRoot!=null&&noteStatus!=='idle'&&<>
+        <circle cx={cx} cy={cy} r={iR-sz*.016} fill="none"
+          stroke={qCol} strokeWidth="1.5" strokeOpacity=".4" style={{filter:'url(#csg)'}}/>
+        <text x={cx} y={cy-sz*.025} textAnchor="middle" dominantBaseline="middle"
+          fontSize={sz*.08} fontWeight={200} fill={qCol}
+          fontFamily="Georgia,serif" style={{filter:noteStatus==='correct'?'url(#csg)':'none'}}>
+          {chordName(currentRoot,currentType??'maj',usesFlat(currentRoot))}
+        </text>
+        <text x={cx} y={cy+sz*.052} textAnchor="middle" dominantBaseline="middle"
+          fontSize={sz*.022} fill={qCol+'99'} letterSpacing="2" fontFamily="Georgia,serif">
+          {noteStatus==='correct'?'CORRECT':noteStatus==='wrong'?'RATÉ':'ÉCOUTE'}
+        </text>
+      </>}
+      {(currentRoot==null||noteStatus==='idle')&&(
+        <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle"
+          fontSize={sz*.024} fill="#1e1e30" letterSpacing="3" fontFamily="Georgia,serif">
+          QUINTESSENCE
+        </text>
+      )}
+    </svg>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// NETWORK SVG
+// ═══════════════════════════════════════════════════════════
+const NetworkSVG=memo(({W,H,currentId,nextId,history,noteStatus})=>{
+  const positions=useMemo(()=>computeLayout(W,H),[W,H]);
+  const nR=Math.min(W,H)*.038;
+  const fs=nR*.72;
+  const histSet=new Set(history.slice(-6));
+  const visEdges=useMemo(()=>NETWORK.edges.filter(e=>e.weight<=2),[]);
+  return(
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{position:'absolute',inset:0}}>
+      <defs>
+        <radialGradient id="nbg" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#0e0a18"/><stop offset="100%" stopColor="#060608"/>
+        </radialGradient>
+        <filter id="ng" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="nsg" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="10" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <marker id="arr" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+          <path d="M0,0 L5,2.5 L0,5 Z" fill="#ffffff14"/>
+        </marker>
+        <marker id="arrh" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+          <path d="M0,0 L5,2.5 L0,5 Z" fill="#FFB30055"/>
+        </marker>
+        {['maj','min','dom7','aug'].map(t=>(
+          <radialGradient key={t} id={`gn_${t}`} cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor={Q[t].color} stopOpacity="0.9"/>
+            <stop offset="100%" stopColor={Q[t].color} stopOpacity="0.45"/>
+          </radialGradient>
+        ))}
+      </defs>
+      <rect width={W} height={H} fill="url(#nbg)"/>
+      {[.09,.18,.27,.37].map((r,i)=>(
+        <circle key={i} cx={W/2} cy={H/2} r={r*Math.min(W,H)} fill="none" stroke="#ffffff05" strokeWidth="1" strokeDasharray="3,8"/>
+      ))}
+      {/* Trail */}
+      {history.slice(-6).map((hid,i,arr)=>{
+        if(!i)return null;
+        const fp=positions[arr[i-1]],tp=positions[hid];
+        if(!fp||!tp)return null;
+        return<line key={`t${i}`} x1={fp.x} y1={fp.y} x2={tp.x} y2={tp.y}
+          stroke={`rgba(255,179,0,${(i/arr.length)*.4})`} strokeWidth={(i/arr.length)*3} strokeLinecap="round"/>;
+      })}
+      {/* Edges */}
+      {visEdges.map((e,i)=>{
+        const fp=positions[e.from],tp=positions[e.to];
+        if(!fp||!tp)return null;
+        const active=(e.from===currentId&&e.to===nextId)||(histSet.has(e.from)&&histSet.has(e.to));
+        const dx=tp.x-fp.x,dy=tp.y-fp.y,len=Math.sqrt(dx*dx+dy*dy);
+        if(len<1)return null;
+        const ux=dx/len,uy=dy/len;
+        return<line key={i} x1={fp.x+ux*nR} y1={fp.y+uy*nR}
+          x2={tp.x-ux*(nR+5)} y2={tp.y-uy*(nR+5)}
+          stroke={active?'#FFB30044':'#ffffff07'} strokeWidth={active?1.5:.5}
+          markerEnd={active?'url(#arrh)':'url(#arr)'} strokeDasharray={e.weight===2?'3,4':'none'}/>;
+      })}
+      {/* Nodes */}
+      {NETWORK.nodes.map(node=>{
+        const pos=positions[node.id];
+        if(!pos)return null;
+        const isCur=node.id===currentId,isNxt=node.id===nextId&&!isCur;
+        const inHist=histSet.has(node.id)&&!isCur;
+        const q=Q[node.type];
+        const flat=usesFlat(node.root);
+        const r=isCur?nR*1.35:isNxt?nR*1.12:nR;
+        return(
+          <g key={node.id}>
+            {isCur&&<circle cx={pos.x} cy={pos.y} r={r*1.7} fill={q.color+'12'} stroke={q.color+'33'} strokeWidth="1" style={{filter:'url(#nsg)'}}/>}
+            {isNxt&&<circle cx={pos.x} cy={pos.y} r={r*1.5} fill="none" stroke={q.color+'22'} strokeWidth="1" strokeDasharray="3,3"/>}
+            <circle cx={pos.x} cy={pos.y} r={r}
+              fill={isCur?`url(#gn_${node.type})`:isNxt?q.color+'44':inHist?q.color+'22':'#0e0e18'}
+              stroke={isCur?q.color:isNxt?q.color+'88':inHist?q.color+'55':'#1e1e28'}
+              strokeWidth={isCur?2:isNxt?1.5:.5}
+              style={{filter:isCur?'url(#ng)':'none'}}/>
+            <text x={pos.x} y={pos.y} textAnchor="middle" dominantBaseline="middle"
+              fontSize={isCur?fs*1.15:isNxt?fs*1.02:fs*.85}
+              fontWeight={isCur?700:isNxt?500:300}
+              fill={isCur?'#fff':isNxt?q.textColor:inHist?q.color+'99':'#252535'}
+              fontFamily="Georgia,serif" style={{filter:isCur?'url(#ng)':'none',pointerEvents:'none'}}>
+              {chordName(node.root,node.type,flat)}
+            </text>
+          </g>
+        );
+      })}
+      {/* Network legend */}
+      <g transform={`translate(8,${H-22})`}>
+        {Object.entries(Q).filter(([k])=>['maj','min','dom7','aug'].includes(k)).map(([k,q],i)=>(
+          <g key={k} transform={`translate(${i*70},0)`}>
+            <circle cx={5} cy={5} r={5} fill={q.color+'44'} stroke={q.color} strokeWidth=".5"/>
+            <text x={13} y={9} fontSize={8} fill={q.color+'88'}>{q.label}</text>
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+});
+
+// ═══════════════════════════════════════════════════════════
 // SESSIONS PANEL
 // ═══════════════════════════════════════════════════════════
 function SessionsPanel({onClose}){
-  const [sessions,setSess]=useState(loadSessions);
-  const fmt=d=>{const dt=new Date(d);return dt.toLocaleDateString('fr-FR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});};
+  const[sessions,setSess]=useState(loadSessions);
+  const fmt=d=>new Date(d).toLocaleDateString('fr-FR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
   return(
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.9)',display:'flex',alignItems:'flex-end',zIndex:200,backdropFilter:'blur(6px)'}} onClick={onClose}>
       <div onClick={e=>e.stopPropagation()} className="slide-up"
-        style={{width:'100%',maxHeight:'70vh',background:'#0c0c1a',borderRadius:'20px 20px 0 0',border:'1px solid #1a1a2a',display:'flex',flexDirection:'column',overflow:'hidden'}}>
-        <div style={{padding:'14px 18px',borderBottom:'1px solid #141420',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div style={{fontSize:12,letterSpacing:3,color:'#9e8b6e'}}>HISTORIQUE · {sessions.length}</div>
+        style={{width:'100%',maxHeight:'72vh',background:'#0c0c1a',borderRadius:'20px 20px 0 0',border:'1px solid #1a1a2a',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style={{padding:'13px 18px',borderBottom:'1px solid #141420',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div style={{fontSize:11,letterSpacing:3,color:'#9e8b6e'}}>HISTORIQUE · {sessions.length}</div>
           <div style={{display:'flex',gap:8}}>
-            {sessions.length>0&&<button onClick={()=>{clearSess();setSess([]);}} style={{padding:'5px 10px',borderRadius:7,background:'rgba(255,23,68,.1)',border:'1px solid rgba(255,23,68,.3)',color:'#ff4468',fontSize:10,cursor:'pointer'}}>Effacer</button>}
-            <button onClick={onClose} style={{padding:'5px 10px',borderRadius:7,background:'rgba(255,255,255,.05)',border:'1px solid #1e1e2e',color:'#666',fontSize:10,cursor:'pointer'}}>Fermer</button>
+            {sessions.length>0&&<button onClick={()=>{clearSess();setSess([]);}}
+              style={{padding:'4px 10px',borderRadius:7,background:'rgba(255,23,68,.1)',border:'1px solid rgba(255,23,68,.3)',color:'#ff4468',fontSize:10}}>Effacer</button>}
+            <button onClick={onClose}
+              style={{padding:'4px 10px',borderRadius:7,background:'rgba(255,255,255,.04)',border:'1px solid #1e1e2e',color:'#666',fontSize:10}}>Fermer</button>
           </div>
         </div>
         <div style={{overflowY:'auto',padding:'10px 14px',display:'flex',flexDirection:'column',gap:5}}>
-          {sessions.length===0&&<div style={{textAlign:'center',color:'#252535',padding:'30px',fontSize:12,fontStyle:'italic'}}>Aucune session</div>}
+          {!sessions.length&&<div style={{textAlign:'center',color:'#252535',padding:'30px',fontSize:12,fontStyle:'italic'}}>Aucune session</div>}
           {sessions.map(s=>{
-            const a=s.score.total>0?Math.round(100*s.score.correct/s.score.total):0;
-            const ac=a>=80?'#00E676':a>=50?'#FFB300':'#FF4081';
-            return(<div key={s.id} style={{background:'rgba(255,255,255,.025)',border:'1px solid #141420',borderRadius:10,padding:'9px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-              <div>
-                <div style={{fontSize:11,color:'#c8c0b0',marginBottom:2}}>{s.name||'Session'}</div>
-                <div style={{fontSize:9,color:'#3a3a4a',display:'flex',gap:8}}><span>♩{s.bpm}</span><span>{s.bpc}t</span>{s.dur&&<span>{Math.floor(s.dur/60)}m{s.dur%60}s</span>}</div>
-                <div style={{fontSize:8,color:'#1e1e2e',marginTop:1}}>{fmt(s.date)}</div>
+            const a=s.score?.total>0?Math.round(100*s.score.correct/s.score.total):null;
+            const ac=a==null?'#555':a>=80?'#00E676':a>=50?'#FFB300':'#FF4081';
+            return(
+              <div key={s.id} style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'9px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div>
+                  <div style={{fontSize:11,color:'#c8c0b0',marginBottom:2}}>{s.name||'Session'}</div>
+                  <div style={{fontSize:9,color:'#3a3a4a',display:'flex',gap:8}}>
+                    {s.bpm&&<span>♩{s.bpm}</span>}
+                    {s.bpc&&<span>{s.bpc}t</span>}
+                    {s.dur&&<span>{Math.floor(s.dur/60)}m{s.dur%60}s</span>}
+                    {s.mode&&<span style={{color:'#FFB30066'}}>{s.mode}</span>}
+                  </div>
+                  <div style={{fontSize:8,color:'#1e1e2e',marginTop:1}}>{fmt(s.date)}</div>
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{fontSize:20,fontWeight:200,color:ac,fontFamily:'Georgia,serif'}}>{a!=null?`${a}%`:'—'}</div>
+                  {a!=null&&<div style={{fontSize:9,color:'#3a3a4a'}}>{s.score.correct}/{s.score.total}</div>}
+                </div>
               </div>
-              <div style={{textAlign:'right'}}>
-                <div style={{fontSize:20,fontWeight:200,color:ac,fontFamily:'Georgia,serif'}}>{a}%</div>
-                <div style={{fontSize:9,color:'#3a3a4a'}}>{s.score.correct}/{s.score.total}</div>
-              </div>
-            </div>);
+            );
           })}
         </div>
       </div>
@@ -710,338 +974,537 @@ function SessionsPanel({onClose}){
 // MAIN APP
 // ═══════════════════════════════════════════════════════════
 function App(){
-  // Dimensions
-  const [dims,setDims]=useState({w:window.innerWidth,h:window.innerHeight});
-  useEffect(()=>{const h=()=>setDims({w:window.innerWidth,h:window.innerHeight});window.addEventListener('resize',h);return()=>window.removeEventListener('resize',h);},[]);
-  const {w:W,h:H}=dims;
+  const[dims,setDims]=useState({w:window.innerWidth,h:window.innerHeight});
+  useEffect(()=>{
+    const h=()=>setDims({w:window.innerWidth,h:window.innerHeight});
+    window.addEventListener('resize',h);
+    return()=>window.removeEventListener('resize',h);
+  },[]);
+  const{w:W,h:H}=dims;
   const isLandscape=W>H;
 
-  // View mode
-  const [viewMode,setView]=useState('circle'); // circle|network
-  const [showPicker,setShowPicker]=useState(false);
-  const [showSess,setShowSess]=useState(false);
+  // ── App mode ─────────────────────────────────────────────
+  const[appMode,setAppMode]=useState('exercise'); // exercise | analyse
+  const[viewMode,setViewMode]=useState('circle'); // circle | network | piano
+  const[showPiano,setShowPiano]=useState(true);
+  const[showPicker,setShowPicker]=useState(false);
+  const[showSess,setShowSess]=useState(false);
+  const[voicingMode,setVoicingMode]=useState('shell'); // shell | rootless
 
-  // Source mode: progression | walk
-  const [sourceMode,setSourceMode]=useState('progression'); // progression|walk
+  // ── Source / walk ──────────────────────────────────────
+  const[sourceMode,setSourceMode]=useState('progression');
+  const[progression,setProgression]=useState(PROGRESSIONS[0]);
+  const[transposeKey,setTranspose]=useState(0);
+  const[walkMode,setWalkMode]=useState(WALK_MODES[0]);
+  const[walkStartRoot,setWalkStartRoot]=useState(0);
+  const[walkStartType,setWalkStartType]=useState('maj');
 
-  // Progression mode
-  const [progression,setProgression]=useState(PROGRESSIONS[0]);
-  const [transposeKey,setTranspose]=useState(0);
+  // ── Exercise settings ──────────────────────────────────
+  const[bpm,setBpm]=useState(72);
+  const[bpc,setBpc]=useState(2);
+  const[clickVol,setClickVol]=useState(0.5);
+  const[autoTempo,setAutoTempo]=useState(false);
+  const[autoTempoBars,setAutoTempoBars]=useState(4); // bars before BPM increment
+  const[autoTempoStep,setAutoTempoStep]=useState(5);
 
-  // Walk mode
-  const [walkMode,setWalkMode]=useState(WALK_MODES[0]);
-  const [walkStart,setWalkStart]=useState(nodeId(0,'maj'));
+  // ── Scale display ─────────────────────────────────────
+  const[scaleIdx,setScaleIdx]=useState(0);
 
-  // Shared settings
-  const [bpm,setBpm]=useState(72);
-  const [bpc,setBpc]=useState(2);
-  const [clickVol,setClickVol]=useState(0.5);
-  const [scaleIdx,setScaleIdx]=useState(0);
+  // ── Running state ──────────────────────────────────────
+  const[isRunning,setRunning]=useState(false);
+  const[isListening,setListening]=useState(false);
+  const[step,setStep]=useState(0);
+  const[beat,setBeat]=useState(0);
+  const[beatFlash,setBeatFlash]=useState(false);
+  const[noteStatus,setStatus]=useState('idle');
+  const[detChord,setDetChord]=useState(null);
+  const[score,setScore]=useState({correct:0,total:0});
+  const[walkHistory,setWalkHistory]=useState([]);
+  const[currentWalkId,setCurrentWalkId]=useState(()=>nid(0,'maj'));
+  const[displayBpm,setDisplayBpm]=useState(72);
 
-  // Running state
-  const [isRunning,setRunning]=useState(false);
-  const [isListening,setListening]=useState(false);
-  const [step,setStep]=useState(0);
-  const [beat,setBeat]=useState(0);
-  const [flash,setFlash]=useState(false);
-  const [noteStatus,setStatus]=useState('idle');
-  const [detChord,setDetChord]=useState(null);
-  const [score,setScore]=useState({correct:0,total:0});
-  const [walkHistory,setHistory]=useState([]); // array of nodeIds
-  const [currentWalkId,setWalkId]=useState(walkStart);
-
-  // Refs
+  // ── Refs ──────────────────────────────────────────────
   const audioCtxRef=useRef(null);
   const analyserRef=useRef(null);
   const streamRef=useRef(null);
   const rafRef=useRef(null);
-  const metroRef=useRef(null);
-  const beatCntRef=useRef(0);
+  // Web Audio scheduler refs
+  const schedRef=useRef(null);
+  const nextBeatTimeRef=useRef(0);
+  const beatCountRef=useRef(0);
   const stepRef=useRef(0);
-  const stepResRef=useRef('pending');
-  const walkIdRef=useRef(walkStart);
-  const histRef=useRef([]);
-  const sourceModeRef=useRef(sourceMode);
-  const progressionRef=useRef(progression);
-  const walkModeRef=useRef(walkMode);
-  const transpRef=useRef(transposeKey);
-  const bpcRef=useRef(bpc);
-  const bpmRef=useRef(bpm);
-  const clickVolRef=useRef(clickVol);
-  const scoreRef=useRef(score);
+  const walkIdRef=useRef(nid(0,'maj'));
+  const walkHistRef=useRef([]);
+  const lastDetRef=useRef(null); // BUG FIX #5 — dedicated ref for score eval
+  const scoreRef=useRef({correct:0,total:0});
   const sessStartRef=useRef(null);
   const sessNameRef=useRef('');
+  const evalDoneRef=useRef(false);
+  // Config refs (avoid stale closures in scheduler)
+  const bpmRef=useRef(bpm);
+  const bpcRef=useRef(bpc);
+  const clickVolRef=useRef(clickVol);
+  const sourceModeRef=useRef(sourceMode);
+  const progressionRef=useRef(progression);
+  const transpRef=useRef(transposeKey);
+  const walkModeRef=useRef(walkMode);
+  const autoTempoRef=useRef(autoTempo);
+  const autoTempoBarsRef=useRef(autoTempoBars);
+  const autoTempoStepRef=useRef(autoTempoStep);
+  const barCountRef=useRef(0);
+  const displayBpmRef=useRef(bpm);
 
+  useEffect(()=>{bpmRef.current=bpm;displayBpmRef.current=bpm;},[bpm]);
+  useEffect(()=>{bpcRef.current=bpc;},[bpc]);
+  useEffect(()=>{clickVolRef.current=clickVol;},[clickVol]);
   useEffect(()=>{sourceModeRef.current=sourceMode;},[sourceMode]);
   useEffect(()=>{progressionRef.current=progression;},[progression]);
-  useEffect(()=>{walkModeRef.current=walkMode;},[walkMode]);
   useEffect(()=>{transpRef.current=transposeKey;},[transposeKey]);
-  useEffect(()=>{bpcRef.current=bpc;},[bpc]);
-  useEffect(()=>{bpmRef.current=bpm;},[bpm]);
-  useEffect(()=>{clickVolRef.current=clickVol;},[clickVol]);
-  useEffect(()=>{scoreRef.current=score;},[score]);
+  useEffect(()=>{walkModeRef.current=walkMode;},[walkMode]);
+  useEffect(()=>{autoTempoRef.current=autoTempo;},[autoTempo]);
+  useEffect(()=>{autoTempoBarsRef.current=autoTempoBars;},[autoTempoBars]);
+  useEffect(()=>{autoTempoStepRef.current=autoTempoStep;},[autoTempoStep]);
 
-  // Derived chords for progression mode
+  // Derived chords
   const progChords=useMemo(()=>
-    progression.chords.map(c=>({...c,root:((c.root+transposeKey)%12+12)%12}))
+    progression.chords.map(c=>({...c,root:m12(c.root,transposeKey)}))
   ,[progression,transposeKey]);
 
-  // Current chord
   const currentChord=useMemo(()=>{
-    if(sourceMode==='walk'){
-      const n=parseNode(currentWalkId);
-      return{root:n.root,type:n.type};
-    }
+    if(sourceMode==='walk'){const n=parseNid(currentWalkId);return{root:n.root,type:n.type};}
     return progChords[step%progChords.length];
   },[sourceMode,currentWalkId,progChords,step]);
 
-  const nextChord=useMemo(()=>{
+  // BUG FIX #3,#8 — nextChord uses walkIdRef not state, no histRef in memo
+  const nextChordDisplay=useMemo(()=>{
     if(sourceMode==='walk'){
-      const nextId=nextNode(currentWalkId,walkMode.id,histRef.current);
-      if(!nextId)return null;
-      const n=parseNode(nextId);
-      return{root:n.root,type:n.type,id:nextId};
+      const nxtId=nextNodeFn(walkIdRef.current,walkMode.id,walkHistRef.current);
+      if(!nxtId)return null;
+      const n=parseNid(nxtId);return{root:n.root,type:n.type};
     }
     return progChords[(step+1)%progChords.length];
-  },[sourceMode,currentWalkId,walkMode,progChords,step]);
+  },[sourceMode,currentWalkId,walkMode,progChords,step]);// currentWalkId triggers recompute when walk advances
 
   const activeRoots=useMemo(()=>{
-    if(sourceMode==='walk') return new Set(NETWORK.nodes.map(n=>n.root));
+    if(sourceMode==='walk')return new Set(Array.from({length:12},(_,i)=>i));
     return new Set(progChords.map(c=>c.root));
   },[sourceMode,progChords]);
 
-  const activeIds=useMemo(()=>{
-    if(sourceMode==='walk') return null; // all shown
-    return new Set(progChords.map(c=>nodeId(c.root,c.type)));
-  },[sourceMode,progChords]);
-
-  // ── Mic ──────────────────────────────────────────────────
+  // ── Mic ─────────────────────────────────────────────────
   const startMic=useCallback(async()=>{
     try{
       const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
       streamRef.current=stream;
-      const ctx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+      // BUG FIX #9 — don't force 44100, use device native rate
+      const ctx=new(window.AudioContext||window.webkitAudioContext)();
       audioCtxRef.current=ctx;
       const src=ctx.createMediaStreamSource(stream);
-      const an=ctx.createAnalyser();an.fftSize=8192;an.smoothingTimeConstant=0.3;
-      analyserRef.current=an;src.connect(an);setListening(true);
+      const an=ctx.createAnalyser();
+      an.fftSize=8192;
+      an.smoothingTimeConstant=0.3;
+      analyserRef.current=an;
+      src.connect(an);
+      setListening(true);
       const fd=new Float32Array(an.frequencyBinCount);
-      const poll=()=>{an.getFloatFrequencyData(fd);const mx=Math.max(...Array.from(fd).slice(0,600));if(mx>-75){setDetChord(detectChord(buildChroma(fd,44100,8192)));}else setDetChord(null);rafRef.current=requestAnimationFrame(poll);};
+      const sr=ctx.sampleRate;
+      const fftSz=an.fftSize;
+      const poll=()=>{
+        if(!analyserRef.current)return;
+        an.getFloatFrequencyData(fd);
+        // Check signal level using mid-range bins
+        const midMax=Math.max(...Array.from(fd).slice(10,400));
+        if(midMax>-75){
+          const det=detectChord(buildChroma(fd,sr,fftSz));
+          lastDetRef.current=det;// BUG FIX #5
+          setDetChord(det);
+        }else{
+          lastDetRef.current=null;
+          setDetChord(null);
+        }
+        rafRef.current=requestAnimationFrame(poll);
+      };
       poll();
     }catch(e){alert('Micro refusé : '+e.message);}
   },[]);
 
   const stopMic=useCallback(()=>{
     cancelAnimationFrame(rafRef.current);
-    try{analyserRef.current?.disconnect();audioCtxRef.current?.close();}catch{}
+    rafRef.current=null;
+    try{analyserRef.current?.disconnect();}catch{}
+    try{audioCtxRef.current?.close();}catch{}
     streamRef.current?.getTracks().forEach(t=>t.stop());
-    audioCtxRef.current=null;setListening(false);setDetChord(null);
+    audioCtxRef.current=null;
+    analyserRef.current=null;
+    setListening(false);
+    setDetChord(null);
+    lastDetRef.current=null;
   },[]);
 
-  // ── Metronome ─────────────────────────────────────────────
+  // ── Web Audio Scheduled Metronome (BUG FIX #6) ─────────
+  const LOOKAHEAD=0.1; // seconds to schedule ahead
+  const SCHED_INTERVAL=50; // ms between scheduler calls
+
+  function evaluateAndAdvance(){
+    // BUG FIX #5 — read from ref, not state setter
+    const cur=lastDetRef.current;
+    let expectedRoot,expectedType;
+    if(sourceModeRef.current==='walk'){
+      const n=parseNid(walkIdRef.current);
+      expectedRoot=n.root;expectedType=n.type;
+    }else{
+      const chd=progressionRef.current.chords[stepRef.current%progressionRef.current.chords.length];
+      expectedRoot=m12(chd.root,transpRef.current);expectedType=chd.type;
+    }
+    let ok=false;
+    if(cur){
+      const rOk=cur.root===expectedRoot;
+      const MAJ=['maj','maj7','maj6','sus2','sus4'];
+      const MIN=['min','min7','min6','min7b5'];
+      const DOM=['dom7','dom9'];
+      const DIM=['dim','dim7'];
+      const AUG=['aug'];
+      const familyMatch=(exp,det)=>{
+        if(MAJ.includes(exp))return MAJ.includes(det);
+        if(MIN.includes(exp))return MIN.includes(det);
+        if(DOM.includes(exp))return DOM.includes(det);
+        if(DIM.includes(exp))return DIM.includes(det);
+        if(AUG.includes(exp))return AUG.includes(det);
+        return exp===det;
+      };
+      ok=rOk&&familyMatch(expectedType,cur.type);
+    }
+    setStatus(ok?'correct':'wrong');
+    setScore(s=>{const ns={correct:s.correct+(ok?1:0),total:s.total+1};scoreRef.current=ns;return ns;});
+  }
+
+  function advanceStep(){
+    if(sourceModeRef.current==='walk'){
+      const nxt=nextNodeFn(walkIdRef.current,walkModeRef.current.id,walkHistRef.current);
+      if(nxt){
+        walkIdRef.current=nxt;
+        walkHistRef.current=[...walkHistRef.current.slice(-20),nxt];
+        setCurrentWalkId(nxt);
+        setWalkHistory(h=>[...h.slice(-20),nxt]);
+      }
+    }else{
+      stepRef.current=(stepRef.current+1)%progressionRef.current.chords.length;
+      setStep(stepRef.current);
+      // Auto-tempo: check bar completion
+      if(stepRef.current===0){
+        barCountRef.current++;
+        if(autoTempoRef.current&&barCountRef.current%autoTempoBarsRef.current===0){
+          const newBpm=Math.min(220,displayBpmRef.current+autoTempoStepRef.current);
+          displayBpmRef.current=newBpm;
+          bpmRef.current=newBpm;
+          setDisplayBpm(newBpm);
+        }
+      }
+    }
+    evalDoneRef.current=false;
+    setStatus('listening');
+    setScaleIdx(0);
+  }
+
+  function runScheduler(){
+    if(!audioCtxRef.current)return;
+    const ctx=audioCtxRef.current;
+    while(nextBeatTimeRef.current<ctx.currentTime+LOOKAHEAD){
+      const beat=beatCountRef.current%bpcRef.current;
+      const t=nextBeatTimeRef.current;
+      // Schedule click
+      playClick(ctx,beat===0,clickVolRef.current,t);
+      // UI beat update (approximate, via setTimeout from audio time)
+      const delay=Math.max(0,(t-ctx.currentTime)*1000);
+      const capBeat=beat;
+      setTimeout(()=>{
+        setBeat(capBeat);
+        setBeatFlash(true);
+        setTimeout(()=>setBeatFlash(false),120);
+      },delay);
+      // On last beat of chord: evaluate then advance
+      if(beat===bpcRef.current-1){
+        setTimeout(()=>{
+          if(!evalDoneRef.current){
+            evalDoneRef.current=true;
+            evaluateAndAdvance();
+          }
+          setTimeout(advanceStep,80);
+        },delay);
+      }
+      nextBeatTimeRef.current+=60/bpmRef.current;
+      beatCountRef.current++;
+    }
+    schedRef.current=setTimeout(runScheduler,SCHED_INTERVAL);
+  }
+
   const stopMetronome=useCallback(()=>{
-    clearInterval(metroRef.current);
-    setRunning(false);beatCntRef.current=0;stepRef.current=0;
-    setStep(0);setBeat(0);setStatus('idle');stepResRef.current='pending';
+    clearTimeout(schedRef.current);
+    schedRef.current=null;
+    setRunning(false);
+    beatCountRef.current=0;stepRef.current=0;barCountRef.current=0;
+    setStep(0);setBeat(0);setStatus('idle');evalDoneRef.current=false;
     if(sessStartRef.current&&scoreRef.current.total>0){
-      saveSess({name:sessNameRef.current,bpm:bpmRef.current,bpc:bpcRef.current,
-        score:scoreRef.current,dur:Math.round((Date.now()-sessStartRef.current)/1000)});
+      saveSess({
+        name:sessNameRef.current,
+        bpm:displayBpmRef.current,
+        bpc:bpcRef.current,
+        score:scoreRef.current,
+        dur:Math.round((Date.now()-sessStartRef.current)/1000),
+        mode:sourceModeRef.current==='walk'?'walk':'prog',
+      });
     }
     sessStartRef.current=null;
   },[]);
 
   const startMetronome=useCallback(()=>{
     if(!isListening){alert('Activez le micro d\'abord !');return;}
-    beatCntRef.current=0;stepRef.current=0;stepResRef.current='pending';
-    const startId=walkStart;
-    walkIdRef.current=startId;histRef.current=[startId];
-    setWalkId(startId);setHistory([startId]);
+    const startKey=nid(walkStartRoot,walkStartType);
+    walkIdRef.current=startKey;
+    walkHistRef.current=[startKey];
+    setCurrentWalkId(startKey);
+    setWalkHistory([startKey]);
+    stepRef.current=0;beatCountRef.current=0;barCountRef.current=0;
+    evalDoneRef.current=false;
     setStep(0);setBeat(0);setStatus('listening');setScore({correct:0,total:0});
+    scoreRef.current={correct:0,total:0};
     sessStartRef.current=Date.now();
-    sessNameRef.current=sourceModeRef.current==='walk'?`Walk — ${walkModeRef.current.name}`:progressionRef.current.name;
+    sessNameRef.current=sourceMode==='walk'?`Walk — ${walkMode.name}`:progression.name;
     setRunning(true);
-
-    metroRef.current=setInterval(()=>{
-      const b=beatCntRef.current%bpcRef.current;
-      setBeat(b);setFlash(true);setTimeout(()=>setFlash(false),80);
-      if(audioCtxRef.current)playClick(audioCtxRef.current,b===0,clickVolRef.current);
-
-      if(b===bpcRef.current-1){
-        // Get expected chord
-        let expectedRoot,expectedType;
-        if(sourceModeRef.current==='walk'){
-          const n=parseNode(walkIdRef.current);
-          expectedRoot=n.root;expectedType=n.type;
-        }else{
-          const prog=progressionRef.current;
-          const chd=prog.chords[stepRef.current%prog.chords.length];
-          expectedRoot=((chd.root+transpRef.current)%12+12)%12;
-          expectedType=chd.type;
-        }
-
-        if(stepResRef.current==='pending'){
-          setDetChord(cur=>{
-            let ok=false;
-            if(cur){
-              const rOk=cur.root===expectedRoot;
-              const maj=['maj','maj7','maj6','dom9','sus2','sus4'];
-              const min=['min','min7','min6','min7b5'];
-              const dom=['dom7','dom9','dom7s11'];
-              const dm=['dim','dim7'];
-              const au=['aug'];
-              const tOk=maj.includes(expectedType)?maj.includes(cur.type):
-                         min.includes(expectedType)?min.includes(cur.type):
-                         dom.includes(expectedType)?dom.includes(cur.type):
-                         dm.includes(expectedType)?dm.includes(cur.type):
-                         au.includes(expectedType)?au.includes(cur.type):cur.type===expectedType;
-              ok=rOk&&tOk;
-            }
-            setStatus(ok?'correct':'wrong');
-            setScore(s=>{const ns={correct:s.correct+(ok?1:0),total:s.total+1};scoreRef.current=ns;return ns;});
-            stepResRef.current='scored';
-            return cur;
-          });
-        }
-
-        // Advance
-        setTimeout(()=>{
-          if(sourceModeRef.current==='walk'){
-            const nxt=nextNode(walkIdRef.current,walkModeRef.current.id,histRef.current);
-            if(nxt){
-              walkIdRef.current=nxt;
-              histRef.current=[...histRef.current.slice(-20),nxt];
-              setWalkId(nxt);
-              setHistory(h=>[...h.slice(-20),nxt]);
-            }
-          }else{
-            stepRef.current=(stepRef.current+1)%progressionRef.current.chords.length;
-            setStep(stepRef.current);
-          }
-          stepResRef.current='pending';setStatus('listening');setScaleIdx(0);
-        },110);
-      }
-      beatCntRef.current++;
-    },60000/bpmRef.current);
-  },[isListening,walkStart]);
+    if(autoTempo){setBpm(bpm);setDisplayBpm(bpm);bpmRef.current=bpm;displayBpmRef.current=bpm;}
+    nextBeatTimeRef.current=audioCtxRef.current.currentTime+0.05;
+    runScheduler();
+  },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo]);
 
   useEffect(()=>()=>{stopMetronome();stopMic();},[]);
 
   const acc=score.total>0?Math.round(100*score.correct/score.total):null;
-  const statusColor=noteStatus==='correct'?'#00E676':noteStatus==='wrong'?'#FF1744':noteStatus==='listening'?'#FFB300':'#2a2a3e';
   const qCol=currentChord?Q[currentChord.type]?.color??'#FFB300':'#FFB300';
+  const flat=currentChord?usesFlat(currentChord.root):true;
 
-  // Walk ID for next (preview)
-  const nextWalkId=sourceMode==='walk'?nextNode(currentWalkId,walkMode.id,histRef.current):null;
+  // ── Analyse libre: current chord = detected or null
+  const analyseChord=appMode==='analyse'?detChord:null;
+  const displayChord=appMode==='analyse'?analyseChord:currentChord;
+  const displayRoot=isRunning&&currentChord?currentChord.root:(analyseChord?analyseChord.root:null);
+  const displayType=isRunning&&currentChord?currentChord.type:(analyseChord?analyseChord.type:null);
 
-  // ── Control panel ─────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+  // CONTROL PANEL
+  // ═══════════════════════════════════════════════════════════
+  const panelW=isLandscape?W*.47:W;
+  const pianoW=panelW-20;
+
   const panel=(
-    <div style={{display:'flex',flexDirection:'column',gap:8,height:'100%',overflowY:'auto',padding:isLandscape?'0 4px':'0 2px'}}>
+    <div style={{display:'flex',flexDirection:'column',gap:7,height:'100%',overflowY:'auto',
+      padding:isLandscape?'4px 8px 4px 4px':'4px 10px 6px'}}>
 
-      {/* Current chord card */}
-      <div style={{
-        border:`2px solid ${isRunning?qCol+'aa':'#1a1a28'}`,borderRadius:16,padding:'11px 13px',
-        background:isRunning?`${qCol}0e`:'rgba(255,255,255,.02)',
-        boxShadow:isRunning?`0 0 28px ${qCol}22`:'none',transition:'all .18s',
-      }}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
-          <div>
-            <div style={{fontSize:8,letterSpacing:3,color:'#3a3a4e',marginBottom:2}}>MAINTENANT</div>
-            <div style={{fontSize:36,fontWeight:200,color:isRunning?qCol:'#2a2a3a',lineHeight:1,fontFamily:'Georgia,serif'}}>
-              {isRunning&&currentChord?chordName(currentChord.root,currentChord.type,true):'—'}
-            </div>
-            <div style={{fontSize:10,color:qCol+'99',marginTop:2}}>
-              {isRunning&&currentChord?Q[currentChord.type]?.label:''}
-            </div>
-          </div>
-          <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
-            {/* Beat dots */}
-            <div style={{display:'flex',gap:4}}>
-              {Array.from({length:bpc}).map((_,i)=>(
-                <div key={i} style={{width:i===beat&&isRunning?10:6,height:i===beat&&isRunning?10:6,borderRadius:'50%',background:i===beat&&isRunning?(flash?'#FFB300':'#8a6000'):'#141428',border:i===0?'1px solid #333':'1px solid #1e1e2e',boxShadow:i===beat&&isRunning&&flash?'0 0 10px #FFB300':'none',transition:'all .06s'}}/>
-              ))}
-            </div>
-            {isRunning&&nextChord&&(
-              <div style={{textAlign:'right'}}>
-                <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>SUIVANT</div>
-                <div style={{fontSize:20,fontWeight:200,color:Q[nextChord.type]?.color+'77',fontFamily:'Georgia,serif'}}>
-                  {chordName(nextChord.root,nextChord.type,true)}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-        {/* Scales */}
-        {isRunning&&currentChord&&(
-          <ScalePills root={currentChord.root} type={currentChord.type}
-            scaleIdx={scaleIdx} onCycle={()=>setScaleIdx(i=>(i+1)%((CHORD_SCALES[currentChord.type]||[]).length||1))}/>
-        )}
-      </div>
-
-      {/* Source mode */}
+      {/* ── App mode selector ── */}
       <div style={{display:'flex',gap:3,background:'rgba(255,255,255,.03)',borderRadius:10,padding:3}}>
-        {[['progression','Progression','♩'],['walk','Réseau Walk','⟳']].map(([v,l,ic])=>(
-          <button key={v} onClick={()=>!isRunning&&setSourceMode(v)}
-            style={{flex:1,padding:'7px 0',borderRadius:7,fontSize:11,
-              background:sourceMode===v?'rgba(255,179,0,.18)':'transparent',
-              border:sourceMode===v?'1px solid #FFB30055':'1px solid transparent',
-              color:sourceMode===v?'#FFB300':'#3a3a4a',cursor:isRunning?'not-allowed':'pointer',letterSpacing:.5}}>
+        {[['exercise','Exercice','🎯'],['analyse','Analyse libre','🔍']].map(([v,l,ic])=>(
+          <button key={v} onClick={()=>{if(isRunning)return;setAppMode(v);}}
+            style={{flex:1,padding:'7px 4px',borderRadius:7,fontSize:11,
+              background:appMode===v?'rgba(255,179,0,.18)':'transparent',
+              border:appMode===v?'1px solid #FFB30055':'1px solid transparent',
+              color:appMode===v?'#FFB300':'#3a3a4a',
+              cursor:isRunning?'not-allowed':'pointer',letterSpacing:.3}}>
             {ic} {l}
           </button>
         ))}
       </div>
 
-      {/* Walk config */}
-      {sourceMode==='walk'&&(
-        <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:12,padding:'9px 11px',display:'flex',flexDirection:'column',gap:6}}>
+      {/* ── Current chord card ── */}
+      <div style={{
+        border:`2px solid ${(isRunning||appMode==='analyse')?qCol+'aa':'#1a1a28'}`,
+        borderRadius:16,padding:'10px 13px',
+        background:(isRunning||appMode==='analyse')?`${qCol}0d`:'rgba(255,255,255,.02)',
+        boxShadow:(isRunning||appMode==='analyse')?`0 0 28px ${qCol}22`:'none',
+        transition:'all .18s',
+      }}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:7}}>
+          <div>
+            <div style={{fontSize:8,letterSpacing:3,color:'#3a3a4e',marginBottom:2}}>
+              {appMode==='analyse'?'DÉTECTÉ':'MAINTENANT'}
+            </div>
+            <div style={{fontSize:38,fontWeight:200,color:(isRunning||analyseChord)?qCol:'#2a2a3a',lineHeight:1,fontFamily:'Georgia,serif'}}>
+              {(isRunning&&currentChord)?chordName(currentChord.root,currentChord.type,flat):
+               analyseChord?chordName(analyseChord.root,analyseChord.type,usesFlat(analyseChord.root)):'—'}
+            </div>
+            <div style={{fontSize:10,color:qCol+'88',marginTop:2}}>
+              {(isRunning&&currentChord)?Q[currentChord.type]?.label:
+               analyseChord?Q[analyseChord.type]?.label:''}
+            </div>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:5}}>
+            {/* Beat indicator */}
+            {appMode==='exercise'&&(
+              <div style={{display:'flex',gap:4}}>
+                {Array.from({length:bpc}).map((_,i)=>(
+                  <div key={i} style={{
+                    width:i===beat&&isRunning?10:6,height:i===beat&&isRunning?10:6,
+                    borderRadius:'50%',
+                    background:i===beat&&isRunning?(beatFlash?'#FFB300':'#6a5000'):'#141428',
+                    border:i===0?'1px solid #333':'1px solid #1e1e2e',
+                    boxShadow:i===beat&&isRunning&&beatFlash?'0 0 12px #FFB300':'none',
+                    transition:'all .06s'
+                  }}/>
+                ))}
+              </div>
+            )}
+            {/* Next chord */}
+            {appMode==='exercise'&&isRunning&&nextChordDisplay&&(
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>SUIVANT</div>
+                <div style={{fontSize:20,fontWeight:200,fontFamily:'Georgia,serif',
+                  color:Q[nextChordDisplay.type]?.color+'66'}}>
+                  {chordName(nextChordDisplay.root,nextChordDisplay.type,usesFlat(nextChordDisplay.root))}
+                </div>
+              </div>
+            )}
+            {/* Analyse: confidence */}
+            {appMode==='analyse'&&analyseChord&&(
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:8,color:'#2a2a3a',letterSpacing:1}}>CONFIANCE</div>
+                <div style={{fontSize:18,fontWeight:200,
+                  color:analyseChord.score>0.5?'#00E676':analyseChord.score>0.25?'#FFB300':'#FF4081',
+                  fontFamily:'Georgia,serif'}}>
+                  {Math.round(Math.min(100,analyseChord.score*100))}%
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Scale pills */}
+        {(displayChord)&&(
+          <ScalePills root={displayChord.root} type={displayChord.type}
+            scaleIdx={scaleIdx} compact={false}
+            onCycle={()=>setScaleIdx(i=>(i+1)%((CHORD_SCALES[displayChord.type]||[]).length||1))}/>
+        )}
+      </div>
+
+      {/* ── Piano keyboard ── */}
+      {showPiano&&displayChord&&(
+        <div style={{background:'rgba(255,255,255,.015)',border:'1px solid #141420',borderRadius:12,padding:'8px 10px',display:'flex',flexDirection:'column',gap:5}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{fontSize:8,letterSpacing:3,color:'#3a3a4e'}}>CLAVIER</div>
+            <div style={{display:'flex',gap:4}}>
+              {[['shell','Shell 1-3-7'],['rootless','Rootless']].map(([v,l])=>(
+                <button key={v} onClick={()=>setVoicingMode(v)}
+                  style={{padding:'2px 7px',borderRadius:5,fontSize:8,
+                    background:voicingMode===v?'rgba(224,64,251,.15)':'rgba(255,255,255,.03)',
+                    border:voicingMode===v?'1px solid #E040FB55':'1px solid #141420',
+                    color:voicingMode===v?'#E040FB':'#2a2a3a',cursor:'pointer',letterSpacing:.5}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+          <PianoKeyboard root={displayChord.root} chordType={displayChord.type}
+            scaleKey={(CHORD_SCALES[displayChord.type]||['ionian'])[Math.min(scaleIdx,(CHORD_SCALES[displayChord.type]||['ionian']).length-1)]}
+            voicingMode={voicingMode} W={pianoW} compact={false}/>
+        </div>
+      )}
+
+      {/* ── Detected chord (exercise mode) ── */}
+      {appMode==='exercise'&&isListening&&(
+        <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 11px',display:'flex',alignItems:'center',gap:9}}>
+          <div style={{width:7,height:7,borderRadius:'50%',flexShrink:0,
+            background:detChord?'#4CAF50':'#1a1a28',
+            boxShadow:detChord?'0 0 8px #4CAF5088':'none',transition:'all .1s'}}/>
+          <div style={{flex:1}}>
+            <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>
+              FFT DÉTECTÉ
+              {detChord&&<span style={{marginLeft:8,color:'#1a3020',fontSize:7}}>
+                {Math.round(Math.min(100,detChord.score*100))}%
+              </span>}
+            </div>
+            <div style={{fontSize:15,color:detChord?'#c8e8d0':'#252535',fontFamily:'Georgia,serif'}}>
+              {detChord?chordName(detChord.root,detChord.type,usesFlat(detChord.root)):'—'}
+              {detChord&&<span style={{fontSize:9,color:'#2a3a2e',marginLeft:5}}>{Q[detChord.type]?.label}</span>}
+            </div>
+            {detChord&&<div style={{height:2,background:'#0a120e',borderRadius:1,marginTop:3,overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${Math.min(100,detChord.score*100)}%`,
+                background:detChord.score>0.5?'#00E676':detChord.score>0.25?'#FFB300':'#FF4081',
+                borderRadius:1,transition:'width .15s'}}/>
+            </div>}
+          </div>
+          {acc!=null&&<div style={{textAlign:'right'}}>
+            <div style={{fontSize:19,fontWeight:200,fontFamily:'Georgia,serif',
+              color:acc>=70?'#00E676':acc>=40?'#FFB300':'#FF4081'}}>{acc}%</div>
+            <div style={{fontSize:8,color:'#2a2a3a'}}>{score.correct}/{score.total}</div>
+          </div>}
+        </div>
+      )}
+
+      {/* ── Source mode (exercise only) ── */}
+      {appMode==='exercise'&&(
+        <div style={{display:'flex',gap:3,background:'rgba(255,255,255,.02)',borderRadius:9,padding:3}}>
+          {[['progression','Progression','♩'],['walk','Réseau Walk','⟳']].map(([v,l,ic])=>(
+            <button key={v} onClick={()=>!isRunning&&setSourceMode(v)}
+              style={{flex:1,padding:'6px 0',borderRadius:6,fontSize:10,
+                background:sourceMode===v?'rgba(255,179,0,.15)':'transparent',
+                border:sourceMode===v?'1px solid #FFB30044':'1px solid transparent',
+                color:sourceMode===v?'#FFB300':'#3a3a4a',
+                cursor:isRunning?'not-allowed':'pointer',letterSpacing:.3}}>
+              {ic} {l}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Walk config ── */}
+      {appMode==='exercise'&&sourceMode==='walk'&&(
+        <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:12,padding:'8px 11px',display:'flex',flexDirection:'column',gap:5}}>
           <div style={{fontSize:8,letterSpacing:3,color:'#3a3a4e'}}>MODE DE MARCHE</div>
-          <div style={{display:'flex',flexDirection:'column',gap:3}}>
+          <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
             {WALK_MODES.map(wm=>(
               <button key={wm.id} onClick={()=>!isRunning&&setWalkMode(wm)}
-                style={{padding:'6px 10px',borderRadius:8,textAlign:'left',
-                  background:walkMode.id===wm.id?'rgba(255,179,0,.12)':'rgba(255,255,255,.02)',
-                  border:walkMode.id===wm.id?'1px solid #FFB30055':'1px solid transparent',
+                style={{padding:'4px 8px',borderRadius:7,fontSize:10,
+                  background:walkMode.id===wm.id?'rgba(255,179,0,.14)':'rgba(255,255,255,.02)',
+                  border:walkMode.id===wm.id?'1px solid #FFB30055':'1px solid #141420',
+                  color:walkMode.id===wm.id?'#FFB300':'#4a4a5e',
                   cursor:isRunning?'not-allowed':'pointer'}}>
-                <div style={{fontSize:11,color:walkMode.id===wm.id?'#FFB300':'#5a5a6e',fontWeight:walkMode.id===wm.id?600:400}}>{wm.name}</div>
-                <div style={{fontSize:9,color:'#252530'}}>{wm.desc}</div>
+                {wm.name}
               </button>
             ))}
           </div>
-          {/* Start chord */}
-          <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginTop:2}}>ACCORD DE DÉPART</div>
-          <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-            {['maj','min','dom7','aug'].map(type=>(
-              <button key={type} onClick={()=>!isRunning&&setWalkStart(nodeId(parseNode(walkStart).root,type))}
-                style={{padding:'3px 8px',borderRadius:6,fontSize:10,
-                  background:parseNode(walkStart).type===type?Q[type].color+'22':'rgba(255,255,255,.03)',
-                  border:parseNode(walkStart).type===type?`1px solid ${Q[type].color+'66'}`:'1px solid #141420',
-                  color:parseNode(walkStart).type===type?Q[type].color:'#2a2a3a',cursor:isRunning?'not-allowed':'pointer'}}>
-                {Q[type].label}
-              </button>
-            ))}
-          </div>
-          {/* Root for walk start */}
-          <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
-            {NOTES_FLAT.map((n,i)=>(
-              <button key={i} onClick={()=>!isRunning&&setWalkStart(nodeId(i,parseNode(walkStart).type))}
-                style={{padding:'3px 7px',borderRadius:6,fontSize:10,fontFamily:'Georgia,serif',
-                  background:parseNode(walkStart).root===i?'rgba(255,179,0,.15)':'rgba(255,255,255,.03)',
-                  border:parseNode(walkStart).root===i?'1px solid #FFB30055':'1px solid #141420',
-                  color:parseNode(walkStart).root===i?'#FFB300':'#2a2a3a',cursor:isRunning?'not-allowed':'pointer'}}>
-                {n}
-              </button>
-            ))}
+          <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>DÉPART</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+            <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+              {NOTES_FLAT.map((n,i)=>(
+                <button key={i} onClick={()=>!isRunning&&setWalkStartRoot(i)}
+                  style={{padding:'2px 6px',borderRadius:5,fontSize:10,fontFamily:'Georgia,serif',
+                    background:walkStartRoot===i?'rgba(255,179,0,.15)':'rgba(255,255,255,.02)',
+                    border:walkStartRoot===i?'1px solid #FFB30044':'1px solid #141420',
+                    color:walkStartRoot===i?'#FFB300':'#2a2a3a',
+                    cursor:isRunning?'not-allowed':'pointer'}}>
+                  {n}
+                </button>
+              ))}
+            </div>
+            <div style={{display:'flex',gap:3}}>
+              {['maj','min','dom7','aug'].map(t=>(
+                <button key={t} onClick={()=>!isRunning&&setWalkStartType(t)}
+                  style={{padding:'2px 7px',borderRadius:5,fontSize:9,
+                    background:walkStartType===t?Q[t].color+'22':'rgba(255,255,255,.02)',
+                    border:walkStartType===t?`1px solid ${Q[t].color+'55'}`:'1px solid #141420',
+                    color:walkStartType===t?Q[t].color:'#2a2a3a',
+                    cursor:isRunning?'not-allowed':'pointer'}}>
+                  {Q[t].sym||'M'}
+                </button>
+              ))}
+            </div>
           </div>
           {/* Walk history */}
           {walkHistory.length>1&&(
-            <div style={{display:'flex',gap:4,overflowX:'auto',paddingBottom:2}}>
-              {walkHistory.slice(-12).map((id,i)=>{
-                const n=parseNode(id);const q=Q[n.type];const flat=[1,3,5,6,8,10].includes(n.root);
+            <div style={{display:'flex',gap:3,overflowX:'auto',paddingBottom:2}}>
+              {walkHistory.slice(-10).map((id,i)=>{
+                const n=parseNid(id),q=Q[n.type],flat=usesFlat(n.root);
                 const isCur=id===currentWalkId;
                 return(
-                  <div key={i} style={{flexShrink:0,padding:'3px 7px',borderRadius:6,
-                    background:isCur?q.color+'22':'rgba(255,255,255,.03)',
-                    border:`1px solid ${isCur?q.color+'66':'#141420'}`,fontSize:10,
-                    color:isCur?q.color:'#2a2a3a',fontFamily:'Georgia,serif'}}>
+                  <div key={i} style={{flexShrink:0,padding:'2px 7px',borderRadius:5,
+                    background:isCur?q.color+'22':'rgba(255,255,255,.02)',
+                    border:`1px solid ${isCur?q.color+'55':'#141420'}`,
+                    fontSize:10,color:isCur?q.color:'#2a2a3a',fontFamily:'Georgia,serif'}}>
                     {chordName(n.root,n.type,flat)}
                   </div>
                 );
@@ -1051,34 +1514,39 @@ function App(){
         </div>
       )}
 
-      {/* Progression config */}
-      {sourceMode==='progression'&&(
+      {/* ── Progression config ── */}
+      {appMode==='exercise'&&sourceMode==='progression'&&(
         <div style={{display:'flex',flexDirection:'column',gap:5}}>
           <button onClick={()=>!isRunning&&setShowPicker(true)}
-            style={{padding:'9px 12px',borderRadius:10,textAlign:'left',
-              background:'rgba(255,255,255,.03)',border:'1px solid #1e1e2e',cursor:isRunning?'not-allowed':'pointer'}}>
+            style={{padding:'8px 12px',borderRadius:10,textAlign:'left',
+              background:'rgba(255,255,255,.03)',border:'1px solid #1e1e2e',
+              cursor:isRunning?'not-allowed':'pointer'}}>
             <div style={{fontSize:8,letterSpacing:3,color:'#3a3a4e',marginBottom:2}}>PROGRESSION</div>
             <div style={{fontSize:12,color:'#8a8a9e'}}>{progression.name}</div>
           </button>
           {/* Chord strip */}
-          <div style={{display:'flex',gap:4,overflowX:'auto',paddingBottom:2}}>
-            {progChords.map((c,i)=>{const isCur=i===step%progChords.length&&isRunning;const q=Q[c.type];const flat=[1,3,5,6,8,10].includes(c.root);return(
-              <div key={i} style={{flexShrink:0,padding:'4px 8px',borderRadius:7,textAlign:'center',
-                background:isCur?q.color+'22':'rgba(255,255,255,.03)',
-                border:`1px solid ${isCur?q.color+'77':'#141420'}`,transition:'all .15s'}}>
-                <div style={{fontSize:11,color:isCur?q.color:'#4a4a5e',fontFamily:'Georgia,serif',fontWeight:isCur?700:400}}>
-                  {chordName(c.root,c.type,flat)}</div>
-                <div style={{fontSize:7,color:isCur?q.color+'99':'#252530'}}>{q?.label?.split(' ')[0]}</div>
-              </div>
-            );})}
+          <div style={{display:'flex',gap:3,overflowX:'auto',paddingBottom:2}}>
+            {progChords.map((c,i)=>{
+              const isCur=i===step%progChords.length&&isRunning;
+              const q=Q[c.type];const flat=usesFlat(c.root);
+              return(
+                <div key={i} style={{flexShrink:0,padding:'3px 8px',borderRadius:6,textAlign:'center',
+                  background:isCur?q.color+'22':'rgba(255,255,255,.02)',
+                  border:`1px solid ${isCur?q.color+'66':'#141420'}`,transition:'all .15s'}}>
+                  <div style={{fontSize:11,color:isCur?q.color:'#4a4a5e',fontFamily:'Georgia,serif',fontWeight:isCur?700:400}}>
+                    {chordName(c.root,c.type,flat)}</div>
+                  <div style={{fontSize:7,color:isCur?q.color+'88':'#252530'}}>{q?.label?.split(' ')[0]}</div>
+                </div>
+              );
+            })}
           </div>
           {/* Transpose */}
           <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
             {NOTES_FLAT.map((n,i)=>(
               <button key={i} onClick={()=>!isRunning&&setTranspose(i)}
-                style={{padding:'3px 7px',borderRadius:6,fontSize:10,fontFamily:'Georgia,serif',
-                  background:transposeKey===i?'rgba(255,179,0,.15)':'rgba(255,255,255,.03)',
-                  border:transposeKey===i?'1px solid #FFB30055':'1px solid #141420',
+                style={{padding:'2px 7px',borderRadius:5,fontSize:10,fontFamily:'Georgia,serif',
+                  background:transposeKey===i?'rgba(255,179,0,.15)':'rgba(255,255,255,.02)',
+                  border:transposeKey===i?'1px solid #FFB30044':'1px solid #141420',
                   color:transposeKey===i?'#FFB300':'#2a2a3a',cursor:isRunning?'not-allowed':'pointer'}}>
                 {n}
               </button>
@@ -1087,194 +1555,211 @@ function App(){
         </div>
       )}
 
-      {/* Settings row */}
-      <div style={{display:'flex',gap:8}}>
-        {/* BPM */}
-        {[['BPM',bpm,v=>setBpm(v),30,220,5],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,step])=>(
-          <div key={lbl} style={{flex:1,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'7px 9px'}}>
-            <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:4}}>{lbl}</div>
-            <div style={{display:'flex',alignItems:'center',gap:5}}>
-              <button onClick={()=>!isRunning&&setter(v=>Math.max(mn,v-step))}
-                style={{width:24,height:24,borderRadius:6,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:14,cursor:'pointer'}}>–</button>
-              <span style={{flex:1,textAlign:'center',fontSize:17,color:'#c8c0b0'}}>{val}</span>
-              <button onClick={()=>!isRunning&&setter(v=>Math.min(mx,v+step))}
-                style={{width:24,height:24,borderRadius:6,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:14,cursor:'pointer'}}>+</button>
+      {/* ── Settings (exercise) ── */}
+      {appMode==='exercise'&&(
+        <div style={{display:'flex',gap:6}}>
+          {[['BPM',displayBpm,v=>setBpm(v),40,220,5],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,stp])=>(
+            <div key={lbl} style={{flex:1,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 9px'}}>
+              <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:4}}>{lbl}</div>
+              <div style={{display:'flex',alignItems:'center',gap:4}}>
+                <button onClick={()=>!isRunning&&setter(v=>Math.max(mn,v-stp))}
+                  style={{width:24,height:24,borderRadius:6,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:14}}>–</button>
+                <span style={{flex:1,textAlign:'center',fontSize:17,color:'#c8c0b0'}}>{val}</span>
+                <button onClick={()=>!isRunning&&setter(v=>Math.min(mx,v+stp))}
+                  style={{width:24,height:24,borderRadius:6,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:14}}>+</button>
+              </div>
+            </div>
+          ))}
+          {/* Click volume */}
+          <div style={{flex:1.3,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 9px'}}>
+            <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:7}}>CLIC</div>
+            <div style={{display:'flex',alignItems:'center',gap:4}}>
+              <span style={{fontSize:9}}>🔇</span>
+              <input type="range" min="0" max="1" step=".05" value={clickVol}
+                onChange={e=>setClickVol(+e.target.value)} style={{flex:1}}/>
+              <span style={{fontSize:9}}>🔊</span>
             </div>
           </div>
-        ))}
-        {/* Click vol */}
-        <div style={{flex:1.2,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'7px 9px'}}>
-          <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:8}}>CLIC</div>
-          <div style={{display:'flex',alignItems:'center',gap:4}}>
-            <span style={{fontSize:9}}>🔇</span>
-            <input type="range" min="0" max="1" step=".05" value={clickVol}
-              onChange={e=>setClickVol(+e.target.value)} style={{flex:1}}/>
-            <span style={{fontSize:9}}>🔊</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Detected */}
-      {isListening&&(
-        <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'7px 11px',display:'flex',alignItems:'center',gap:9}}>
-          <div style={{width:7,height:7,borderRadius:'50%',background:detChord?'#4CAF50':'#1a1a28',boxShadow:detChord?'0 0 8px #4CAF5088':'none',transition:'all .1s',flexShrink:0}}/>
-          <div style={{flex:1}}>
-            <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>DÉTECTÉ (FFT)
-              {detChord&&<span style={{marginLeft:8,color:'#1e3a2a',fontSize:7}}>
-                conf: {Math.round(Math.min(100,detChord.score*100))}%
-              </span>}
-            </div>
-            <div style={{fontSize:15,color:detChord?'#c8e8d0':'#252535',fontFamily:'Georgia,serif'}}>
-              {detChord?chordName(detChord.root,detChord.type):'—'}
-              {detChord&&<span style={{fontSize:9,color:'#3a3a4e',marginLeft:5}}>{Q[detChord.type]?.label}</span>}
-            </div>
-            {/* Confidence bar */}
-            {detChord&&<div style={{height:2,background:'#0e1a14',borderRadius:1,marginTop:3,overflow:'hidden'}}>
-              <div style={{height:'100%',width:`${Math.min(100,detChord.score*100)}%`,
-                background:detChord.score>0.5?'#00E676':detChord.score>0.25?'#FFB300':'#FF4081',
-                borderRadius:1,transition:'width .15s'}}/>
-            </div>}
-          </div>
-          {acc!=null&&<div style={{textAlign:'right'}}>
-            <div style={{fontSize:19,fontWeight:200,color:acc>=70?'#00E676':acc>=40?'#FFB300':'#FF4081',fontFamily:'Georgia,serif'}}>{acc}%</div>
-            <div style={{fontSize:8,color:'#2a2a3a'}}>{score.correct}/{score.total}</div>
-          </div>}
         </div>
       )}
 
-      {/* Start/Stop */}
-      <button onClick={isRunning?stopMetronome:startMetronome}
-        style={{padding:'13px',borderRadius:13,fontSize:14,fontWeight:600,letterSpacing:3,
-          background:isRunning?'rgba(255,23,68,.2)':'rgba(255,179,0,.18)',
-          border:isRunning?'2px solid #FF1744':'2px solid #FFB300',
-          color:isRunning?'#FF6E6E':'#FFB300',cursor:'pointer',
-          boxShadow:isRunning?'0 0 24px rgba(255,23,68,.2)':'0 0 24px rgba(255,179,0,.15)',
-          transition:'all .2s',fontFamily:'Georgia,serif'}}>
-        {isRunning?'■  STOP':'▶  START'}
-      </button>
+      {/* ── Auto-tempo trainer ── */}
+      {appMode==='exercise'&&(
+        <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'7px 11px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:autoTempo?5:0}}>
+            <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>TEMPO TRAINER</div>
+            <button onClick={()=>!isRunning&&setAutoTempo(v=>!v)}
+              style={{padding:'3px 9px',borderRadius:6,fontSize:9,
+                background:autoTempo?'rgba(0,201,122,.12)':'rgba(255,255,255,.03)',
+                border:autoTempo?'1px solid #00C97A55':'1px solid #1a1a28',
+                color:autoTempo?'#00C97A':'#3a3a4a',cursor:isRunning?'not-allowed':'pointer'}}>
+              {autoTempo?'ON':'OFF'}
+            </button>
+          </div>
+          {autoTempo&&(
+            <div style={{display:'flex',gap:8,fontSize:9,color:'#555'}}>
+              <div>+{autoTempoStep} BPM toutes</div>
+              <div style={{display:'flex',gap:3,alignItems:'center'}}>
+                <button onClick={()=>setAutoTempoBars(v=>Math.max(1,v-1))}
+                  style={{width:18,height:18,borderRadius:4,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:11}}>–</button>
+                <span style={{color:'#FFB300'}}>{autoTempoBars}</span>
+                <button onClick={()=>setAutoTempoBars(v=>Math.min(16,v+1))}
+                  style={{width:18,height:18,borderRadius:4,background:'#0e0e1a',border:'1px solid #1a1a28',color:'#666',fontSize:11}}>+</button>
+                <span>mesures</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Start / Stop ── */}
+      {appMode==='exercise'&&(
+        <button onClick={isRunning?stopMetronome:startMetronome}
+          style={{padding:'12px',borderRadius:13,fontSize:14,fontWeight:600,letterSpacing:3,
+            background:isRunning?'rgba(255,23,68,.2)':'rgba(255,179,0,.18)',
+            border:isRunning?'2px solid #FF1744':'2px solid #FFB300',
+            color:isRunning?'#FF6E6E':'#FFB300',
+            boxShadow:isRunning?'0 0 24px rgba(255,23,68,.2)':'0 0 24px rgba(255,179,0,.15)',
+            transition:'all .2s',fontFamily:'Georgia,serif'}}>
+          {isRunning?'■  STOP':'▶  START'}
+        </button>
+      )}
 
     </div>
   );
 
+  // ═══════════════════════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════════════════════
+  const vizW=isLandscape?W*.52:W;
+  const vizH=isLandscape?H:H*.44;
+
   return(
     <div style={{
       width:'100%',height:'100%',
-      background:'radial-gradient(ellipse at 20% 15%, #1a0e2e 0%, #060608 55%)',
+      background:'radial-gradient(ellipse at 18% 12%, #1a0e2e 0%, #060608 60%)',
       display:'flex',flexDirection:isLandscape?'row':'column',
       color:'#e8dcc8',userSelect:'none',WebkitUserSelect:'none',overflow:'hidden',
       padding:`env(safe-area-inset-top,6px) env(safe-area-inset-right,8px) env(safe-area-inset-bottom,8px) env(safe-area-inset-left,8px)`,
-      gap:isLandscape?10:6,
+      gap:isLandscape?8:4,
     }}>
 
-      {/* ── Visual panel ─────────────────────────────────── */}
-      <div style={{
-        position:'relative',flexShrink:0,
-        width:isLandscape?'52%':'100%',
-        height:isLandscape?'100%':H*.46,
-        display:'flex',flexDirection:'column',
-      }}>
-        {/* Viz */}
-        <div style={{position:'relative',flex:1,overflow:'hidden'}}>
-          {viewMode==='circle'?(
-            <CircleSVG W={isLandscape?W*.52:W} H={isLandscape?H:H*.46}
-              currentRoot={isRunning?currentChord?.root:null}
-              currentType={isRunning?currentChord?.type:null}
-              nextRoot={isRunning?nextChord?.root:null}
-              activeRoots={activeRoots}
-              noteStatus={noteStatus}/>
-          ):(
-            <NetworkSVG W={isLandscape?W*.52:W} H={isLandscape?H:H*.46}
-              currentId={isRunning?currentWalkId:null}
-              nextId={isRunning?nextWalkId:null}
-              history={walkHistory}
-              activeIds={activeIds}
-              noteStatus={noteStatus}/>
-          )}
-        </div>
+      {/* ── VISUAL PANEL ─────────────────────────────────── */}
+      <div style={{position:'relative',flexShrink:0,width:isLandscape?'52%':'100%',height:vizH,overflow:'hidden'}}>
+        {viewMode==='circle'&&(
+          <CircleSVG W={vizW} H={vizH}
+            currentRoot={displayRoot}
+            currentType={displayType}
+            nextRoot={isRunning?nextChordDisplay?.root:null}
+            activeRoots={activeRoots}
+            noteStatus={noteStatus}/>
+        )}
+        {viewMode==='network'&&(
+          <NetworkSVG W={vizW} H={vizH}
+            currentId={isRunning?currentWalkId:null}
+            nextId={isRunning?nid(...Object.values(parseNid(nextNodeFn(currentWalkId,walkMode.id,walkHistRef.current)||currentWalkId))):null}
+            history={walkHistory}
+            noteStatus={noteStatus}/>
+        )}
+        {viewMode==='piano'&&(
+          <FullPianoView W={vizW} H={vizH}
+            root={displayRoot}
+            chordType={displayType||'maj'}
+            scaleKey={(CHORD_SCALES[displayType||'maj']||['ionian'])[Math.min(scaleIdx,(CHORD_SCALES[displayType||'maj']||['ionian']).length-1)]}
+            voicingMode={voicingMode}
+            onVoicingChange={setVoicingMode}
+            scaleIdx={scaleIdx}
+            onScaleCycle={()=>setScaleIdx(i=>(i+1)%((CHORD_SCALES[displayType||'maj']||[]).length||1))}
+            scales={CHORD_SCALES[displayType||'maj']}
+            currentChordName={displayRoot!=null?chordName(displayRoot,displayType||'maj',usesFlat(displayRoot)):'—'}
+            noteStatus={noteStatus}/>
+        )}
 
-        {/* Header overlay */}
+        {/* Header */}
         <div style={{position:'absolute',top:0,left:0,right:0,padding:'8px 12px',
-          display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          display:'flex',justifyContent:'space-between',alignItems:'center',
+          background:'linear-gradient(to bottom, rgba(6,6,8,.8) 0%, transparent 100%)'}}>
           <div>
-            <div style={{fontSize:8,letterSpacing:5,color:'#2e2e3e',textTransform:'uppercase'}}>Cycle des quintes</div>
+            <div style={{fontSize:7,letterSpacing:5,color:'#2e2e3e',textTransform:'uppercase'}}>Cycle des quintes</div>
             <div style={{fontSize:15,fontWeight:400,letterSpacing:1,color:'#d8ccb8'}}>Quintessence</div>
           </div>
-          <div style={{display:'flex',gap:5}}>
+          <div style={{display:'flex',gap:5,alignItems:'center'}}>
             {/* View toggle */}
-            <div style={{display:'flex',background:'rgba(0,0,0,.5)',borderRadius:8,padding:2,gap:2}}>
-              {[['circle','◎'],['network','⟡']].map(([v,ic])=>(
-                <button key={v} onClick={()=>setView(v)}
+            <div style={{display:'flex',background:'rgba(0,0,0,.6)',borderRadius:8,padding:2,gap:2}}>
+              {[['circle','◎'],['network','⟡'],['piano','🎹']].map(([v,ic])=>(
+                <button key={v} onClick={()=>setViewMode(v)}
                   style={{padding:'4px 8px',borderRadius:6,fontSize:12,
                     background:viewMode===v?'rgba(255,179,0,.2)':'transparent',
                     border:viewMode===v?'1px solid #FFB30044':'1px solid transparent',
-                    color:viewMode===v?'#FFB300':'#444',cursor:'pointer'}}>
+                    color:viewMode===v?'#FFB300':'#444'}}>
                   {ic}
                 </button>
               ))}
             </div>
+            {/* Piano toggle — hide when in piano view */}
+            {viewMode!=='piano'&&<button onClick={()=>setShowPiano(v=>!v)}
+              style={{padding:'5px 8px',borderRadius:8,fontSize:10,letterSpacing:1,
+                background:showPiano?'rgba(224,64,251,.15)':'rgba(0,0,0,.5)',
+                border:showPiano?'1px solid #E040FB66':'1px solid #1e1e2e',
+                color:showPiano?'#E040FB':'#555'}}>
+              🎹
+            </button>}
+            {/* Mic */}
             <button onClick={isListening?stopMic:startMic}
-              style={{padding:'5px 10px',borderRadius:8,fontSize:10,letterSpacing:1,
+              style={{padding:'5px 9px',borderRadius:8,fontSize:10,letterSpacing:1,
                 background:isListening?'rgba(244,67,54,.15)':'rgba(0,0,0,.5)',
-                border:isListening?'1px solid #F4433688':'1px solid #1e1e2e',
-                color:isListening?'#F44336':'#555',cursor:'pointer'}}>
+                border:isListening?'1px solid #F4433666':'1px solid #1e1e2e',
+                color:isListening?'#F44336':'#555'}}>
               {isListening?'⏹':'🎙'}
             </button>
+            {/* Sessions */}
             <button onClick={()=>setShowSess(true)}
               style={{width:32,height:32,borderRadius:8,background:'rgba(0,0,0,.5)',
-                border:'1px solid #1a1a28',color:'#555',fontSize:13,cursor:'pointer'}}>📋</button>
+                border:'1px solid #1a1a28',color:'#555',fontSize:13}}>📋</button>
           </div>
         </div>
-
-        {/* Legend (network view) */}
-        {viewMode==='network'&&(
-          <div style={{position:'absolute',bottom:6,left:0,right:0,display:'flex',justifyContent:'center',gap:10,padding:'0 10px'}}>
-            {Object.entries(Q).filter(([k])=>['maj','min','dom7','aug'].includes(k)).map(([k,q])=>(
-              <div key={k} style={{display:'flex',alignItems:'center',gap:3}}>
-                <div style={{width:8,height:8,borderRadius:'50%',background:q.color,flexShrink:0}}/>
-                <span style={{fontSize:8,color:'#3a3a4a',letterSpacing:.5}}>{q.label}</span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* ── Control panel ────────────────────────────────── */}
-      <div style={{
-        flex:1,overflowY:'auto',minWidth:0,
-        padding:isLandscape?'4px 6px 4px 2px':'0 10px 6px',
-      }}>
+      {/* ── CONTROL PANEL ─────────────────────────────────── */}
+      <div style={{flex:1,overflowY:'auto',minWidth:0,minHeight:0}}>
         {panel}
       </div>
 
-      {/* ── Modals ──────────────────────────────────────── */}
+      {/* ── PROGRESSION PICKER ──────────────────────────── */}
       {showPicker&&(
-        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.92)',zIndex:100,
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.94)',zIndex:100,
           display:'flex',flexDirection:'column',padding:14,gap:10,backdropFilter:'blur(6px)'}} className="slide-up">
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
             <div style={{fontSize:13,letterSpacing:3,color:'#9e8b6e'}}>PROGRESSIONS</div>
             <button onClick={()=>setShowPicker(false)}
-              style={{padding:'6px 14px',borderRadius:9,background:'rgba(255,255,255,.06)',
-                border:'1px solid #2a2a3a',color:'#888',fontSize:11,cursor:'pointer'}}>Fermer</button>
+              style={{padding:'6px 14px',borderRadius:9,background:'rgba(255,255,255,.05)',
+                border:'1px solid #2a2a3a',color:'#888',fontSize:11}}>Fermer</button>
           </div>
-          <div style={{overflowY:'auto',flex:1,display:'flex',flexDirection:'column',gap:5}}>
-            {PROGRESSIONS.map(p=>{const isSel=progression.id===p.id;return(
-              <button key={p.id} onClick={()=>{setProgression(p);setScaleIdx(0);setShowPicker(false);}}
-                style={{padding:'9px 12px',borderRadius:10,textAlign:'left',
-                  background:isSel?'rgba(255,179,0,.12)':'rgba(255,255,255,.03)',
-                  border:isSel?'1px solid #FFB30077':'1px solid #141420',cursor:'pointer'}}>
-                <div style={{fontSize:11,color:isSel?'#FFB300':'#8a8a9e',fontWeight:isSel?600:400,marginBottom:2}}>{p.name}</div>
-                <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:3}}>
-                  {p.chords.slice(0,8).map((c,i)=>{const q=Q[c.type];return(
-                    <span key={i} style={{fontSize:9,padding:'1px 5px',borderRadius:4,
-                      background:q.color+'18',border:`1px solid ${q.color}33`,
-                      color:q.color+'aa',fontFamily:'Georgia,serif'}}>
-                      {chordName(c.root,c.type,[1,3,5,6,8,10].includes(c.root))}
-                    </span>
-                  );})}
-                  {p.chords.length>8&&<span style={{fontSize:9,color:'#2a2a3a'}}>+{p.chords.length-8}</span>}
-                </div>
-              </button>
-            );})}
+          <div style={{overflowY:'auto',flex:1,display:'flex',flexDirection:'column',gap:4}}>
+            {PROGRESSIONS.map(p=>{
+              const sel=progression.id===p.id;
+              return(
+                <button key={p.id} onClick={()=>{setProgression(p);setScaleIdx(0);setShowPicker(false);}}
+                  style={{padding:'8px 12px',borderRadius:10,textAlign:'left',
+                    background:sel?'rgba(255,179,0,.12)':'rgba(255,255,255,.02)',
+                    border:sel?'1px solid #FFB30066':'1px solid #141420',cursor:'pointer'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:3}}>
+                    <span style={{fontSize:11,color:sel?'#FFB300':'#8a8a9e',fontWeight:sel?600:400}}>{p.name}</span>
+                    <span style={{fontSize:8,color:'#3a3a4a',letterSpacing:2}}>{p.cat}</span>
+                  </div>
+                  <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+                    {p.chords.slice(0,8).map((c,i)=>{const q=Q[c.type];return(
+                      <span key={i} style={{fontSize:9,padding:'1px 5px',borderRadius:4,
+                        background:q.color+'18',border:`1px solid ${q.color}33`,
+                        color:q.color+'99',fontFamily:'Georgia,serif'}}>
+                        {chordName(c.root,c.type,usesFlat(c.root))}
+                      </span>
+                    );})}
+                    {p.chords.length>8&&<span style={{fontSize:9,color:'#2a2a3a'}}>+{p.chords.length-8}</span>}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
