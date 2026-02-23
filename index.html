@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Quintessence — Cycle des Quintes</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #0d0d0d; }
+    #root { height: 100%; }
+    button:active { opacity: 0.75; }
+    ::-webkit-scrollbar { width: 4px; background: #111; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── Music Theory ─────────────────────────────────────────────────────────────
+
+const CIRCLE = ['C','G','D','A','E','B','F#','D♭','A♭','E♭','B♭','F'];
+const MINOR  = ['Am','Em','Bm','F♯m','C♯m','G♯m','D♯m','B♭m','Fm','Cm','Gm','Dm'];
+
+const NOTE_LOOKUP = {
+  'C':0,'C#':1,'D♭':1,'D':2,'D#':3,'E♭':3,'E':4,'F':5,'F#':6,'G♭':6,
+  'G':7,'G#':8,'A♭':8,'A':9,'A#':10,'B♭':10,'B':11
+};
+const CHROMATIC = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+function noteToSemitone(n) {
+  return NOTE_LOOKUP[n] ?? NOTE_LOOKUP[n.replace('♭','b')] ?? -1;
+}
+
+function freqToSemitone(freq) {
+  if (!freq || freq < 55 || freq > 1600) return -1;
+  const n = Math.round(12 * Math.log2(freq / 440) + 69);
+  return ((n % 12) + 12) % 12;
+}
+
+function detectPitch(buf, sr) {
+  let rms = 0;
+  for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / buf.length);
+  if (rms < 0.008) return 0;
+  const half = Math.floor(buf.length / 2);
+  let bestLag = -1, bestCorr = -Infinity;
+  for (let lag = Math.floor(sr / 1200); lag < Math.floor(sr / 55); lag++) {
+    let corr = 0;
+    for (let i = 0; i < half; i++) corr += buf[i] * buf[i + lag];
+    if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+  }
+  return bestLag > 0 ? sr / bestLag : 0;
+}
+
+// ─── Patterns ─────────────────────────────────────────────────────────────────
+
+const PATTERNS = [
+  { id:'full_cw',  name:'Cycle complet ↻', desc:'12 quintes ascendantes',     indices:[0,1,2,3,4,5,6,7,8,9,10,11] },
+  { id:'full_ccw', name:'Cycle complet ↺', desc:'12 quartes descendantes',    indices:[0,11,10,9,8,7,6,5,4,3,2,1] },
+  { id:'dim3',     name:'Tritons ×3',       desc:'Tierce dim. C–E♭–G♭–A',    indices:[0,3,6,9] },
+  { id:'aug3',     name:'Tierces majeures', desc:'Cycle augmenté C–E–A♭',     indices:[0,4,8] },
+  { id:'251',      name:'II–V–I majeur',    desc:'Dm–G–C → Am–D–G →…',        indices:[2,7,0, 9,2,7, 4,9,2] },
+  { id:'145',      name:'I–IV–V blues',     desc:'Progression blues / rock',   indices:[0,11,7, 7,6,3, 5,4,1] },
+  { id:'tritone',  name:'Saut de triton',   desc:'Bonds de 6 demi-tons',       indices:[0,6,1,7,2,8,3,9,4,10,5,11] },
+];
+
+const CHORD_COLORS = [
+  '#FFB300','#FF6D00','#E040FB','#00BCD4','#76FF03','#FF4081',
+  '#40C4FF','#FFEA00','#69F0AE','#FF6E40','#EA80FC','#1DE9B6'
+];
+
+// ─── Beat Dots ────────────────────────────────────────────────────────────────
+
+function BeatDots({ count, current, flash }) {
+  return (
+    <div style={{ display:'flex', gap:5 }}>
+      {Array.from({ length: count }).map((_,i) => (
+        <div key={i} style={{
+          width: i===current ? 10 : 7,
+          height: i===current ? 10 : 7,
+          borderRadius:'50%',
+          background: i===current ? (flash ? '#FFB300' : '#cc8c00') : '#222',
+          border: i===0 ? '1px solid #555' : '1px solid #333',
+          boxShadow: i===current && flash ? '0 0 10px #FFB300' : 'none',
+          transition:'all 0.05s',
+        }} />
+      ))}
+    </div>
+  );
+}
+
+// ─── Circle SVG ───────────────────────────────────────────────────────────────
+
+function CircleDisplay({ currentIndex, nextIndex, patternIndices, isRunning, noteStatus, chordMode }) {
+  const size=280, cx=140, cy=140, outerR=120, innerR=78, labelR=100, minorR=60;
+  const statusGlow = noteStatus==='correct' ? '#00E676' : noteStatus==='wrong' ? '#FF1744' : '#FFB300';
+
+  const suffix = chordMode==='min' ? 'm' : chordMode==='dom7' ? '7' : '';
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ overflow:'visible' }}>
+      <defs>
+        <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#1a1225" />
+          <stop offset="100%" stopColor="#0d0d0d" />
+        </radialGradient>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      <circle cx={cx} cy={cy} r={outerR+14} fill="url(#bg)" stroke="#1a1225" strokeWidth="1" />
+
+      {CIRCLE.map((note, i) => {
+        const a0 = (i*30-90)*Math.PI/180;
+        const a1 = ((i+1)*30-90)*Math.PI/180;
+        const isCurrent = i===currentIndex && isRunning;
+        const isNext    = i===nextIndex && isRunning;
+        const inPat     = patternIndices.includes(i);
+        const col = CHORD_COLORS[i];
+
+        const pts = (r, a) => [cx + r*Math.cos(a), cy + r*Math.sin(a)];
+        const [x1o,y1o]=pts(outerR,a0), [x2o,y2o]=pts(outerR,a1);
+        const [x1i,y1i]=pts(innerR,a0), [x2i,y2i]=pts(innerR,a1);
+        const path = `M ${x1i} ${y1i} L ${x1o} ${y1o} A ${outerR} ${outerR} 0 0 1 ${x2o} ${y2o} L ${x2i} ${y2i} A ${innerR} ${innerR} 0 0 0 ${x1i} ${y1i}`;
+
+        const mid = (i*30+15-90)*Math.PI/180;
+        const [lx,ly]=pts(labelR,mid), [mx,my]=pts(minorR,mid);
+
+        return (
+          <g key={i}>
+            <path d={path}
+              fill={isCurrent ? col : isNext ? col+'44' : inPat ? col+'22' : '#111'}
+              stroke={isCurrent ? col : isNext ? col+'88' : inPat ? col+'55' : '#1e1e1e'}
+              strokeWidth={isCurrent ? 2 : 1}
+              style={{ filter: isCurrent ? 'url(#glow)' : 'none', transition:'all 0.15s' }}
+            />
+            <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
+              fontSize={isCurrent?14:11} fontWeight={isCurrent?700:isNext?500:400}
+              fill={isCurrent?'#fff':isNext?'#c8c0b0':inPat?col:'#444'}
+              style={{ filter:isCurrent?'url(#glow)':'none', transition:'all 0.15s' }}
+              fontFamily="Georgia, serif"
+            >{note}{suffix}</text>
+            <text x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
+              fontSize={8} fill={isCurrent?'#88ccaa':'#2a2a2a'} fontFamily="Georgia, serif"
+            >{MINOR[i]}</text>
+          </g>
+        );
+      })}
+
+      <circle cx={cx} cy={cy} r={innerR-2} fill="#0d0d0d" stroke="#222" strokeWidth="1" />
+      {isRunning && <>
+        <circle cx={cx} cy={cy} r={innerR-4} fill="none"
+          stroke={statusGlow} strokeWidth="1.5" strokeOpacity="0.4"
+          style={{ filter:'url(#glow)' }} />
+        <text x={cx} y={cy-6} textAnchor="middle" dominantBaseline="middle"
+          fontSize={28} fontWeight={300} fill={statusGlow}
+          fontFamily="Georgia, serif"
+          style={{ filter: noteStatus==='correct' ? 'url(#glow)' : 'none' }}
+        >{CIRCLE[currentIndex]}</text>
+        <text x={cx} y={cy+18} textAnchor="middle" dominantBaseline="middle"
+          fontSize={9} fill="#444" letterSpacing="2" fontFamily="Georgia, serif"
+        >{noteStatus==='correct'?'CORRECT':noteStatus==='wrong'?'RATÉ':'JOUE…'}</text>
+      </>}
+      {!isRunning && (
+        <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle"
+          fontSize={11} fill="#333" letterSpacing="3" fontFamily="Georgia, serif"
+        >CYCLE</text>
+      )}
+    </svg>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+
+function App() {
+  const [isListening,   setIsListening]   = useState(false);
+  const [bpm,           setBpm]           = useState(60);
+  const [beatsPerChord, setBeatsPerChord] = useState(2);
+  const [pattern,       setPattern]       = useState(PATTERNS[0]);
+  const [chordMode,     setChordMode]     = useState('maj');
+  const [isRunning,     setIsRunning]     = useState(false);
+  const [currentStep,   setCurrentStep]   = useState(0);
+  const [beat,          setBeat]          = useState(0);
+  const [flashBeat,     setFlashBeat]     = useState(false);
+  const [detectedNote,  setDetectedNote]  = useState(null);
+  const [noteStatus,    setNoteStatus]    = useState('idle');
+  const [score,         setScore]         = useState({ correct:0, total:0 });
+
+  const audioCtxRef   = useRef(null);
+  const processorRef  = useRef(null);
+  const streamRef     = useRef(null);
+  const metronomeRef  = useRef(null);
+  const beatCountRef  = useRef(0);
+  const stepRef       = useRef(0);
+  const patternRef    = useRef(pattern);
+  const bpcRef        = useRef(beatsPerChord);
+  const isRunningRef  = useRef(false);
+  const historyRef    = useRef([]);
+  const stepResultRef = useRef('pending');
+
+  useEffect(() => { patternRef.current = pattern; },       [pattern]);
+  useEffect(() => { bpcRef.current     = beatsPerChord; }, [beatsPerChord]);
+
+  // ── Mic ─────────────────────────────────────────────────────────────────────
+  const startMic = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+      streamRef.current = stream;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const proc   = ctx.createScriptProcessor(2048, 1, 1);
+      processorRef.current = proc;
+
+      proc.onaudioprocess = (e) => {
+        const buf  = Array.from(e.inputBuffer.getChannelData(0));
+        const freq = detectPitch(buf, ctx.sampleRate);
+        if (freq > 0) {
+          const semi = freqToSemitone(freq);
+          if (semi >= 0) {
+            historyRef.current.push(semi);
+            if (historyRef.current.length > 8) historyRef.current.shift();
+            const counts = {};
+            historyRef.current.forEach(s => counts[s] = (counts[s]||0)+1);
+            const [best,cnt] = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0];
+            if (cnt >= 3) setDetectedNote(CHROMATIC[+best]);
+          }
+        }
+      };
+      source.connect(proc);
+      proc.connect(ctx.destination);
+      setIsListening(true);
+    } catch(err) {
+      alert('Accès micro refusé : ' + err.message);
+    }
+  }, []);
+
+  const stopMic = useCallback(() => {
+    processorRef.current?.disconnect();
+    audioCtxRef.current?.close();
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    setIsListening(false);
+    setDetectedNote(null);
+  }, []);
+
+  // ── Metronome ────────────────────────────────────────────────────────────────
+  const stopMetronome = useCallback(() => {
+    clearInterval(metronomeRef.current);
+    isRunningRef.current = false;
+    setIsRunning(false);
+    beatCountRef.current = 0;
+    stepRef.current = 0;
+    setCurrentStep(0); setBeat(0); setNoteStatus('idle');
+    stepResultRef.current = 'pending';
+  }, []);
+
+  const startMetronome = useCallback(() => {
+    if (!isListening) { alert('Activez le micro d\'abord !'); return; }
+    beatCountRef.current = 0;
+    stepRef.current = 0;
+    stepResultRef.current = 'pending';
+    historyRef.current = [];
+    isRunningRef.current = true;
+    setIsRunning(true); setCurrentStep(0); setBeat(0); setNoteStatus('listening');
+
+    metronomeRef.current = setInterval(() => {
+      const b = beatCountRef.current % bpcRef.current;
+      setBeat(b);
+      setFlashBeat(true);
+      setTimeout(() => setFlashBeat(false), 80);
+
+      if (b === bpcRef.current - 1) {
+        const pat  = patternRef.current;
+        const idx  = pat.indices[stepRef.current % pat.indices.length];
+        const expected = noteToSemitone(CIRCLE[idx]);
+        const h = historyRef.current;
+
+        if (stepResultRef.current === 'pending') {
+          let correct = false;
+          if (h.length > 0) {
+            const counts = {};
+            h.forEach(s => counts[s] = (counts[s]||0)+1);
+            const [bestSemi] = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0];
+            correct = (+bestSemi) === expected;
+          }
+          setNoteStatus(correct ? 'correct' : 'wrong');
+          setScore(s => ({ correct: s.correct+(correct?1:0), total: s.total+1 }));
+          stepResultRef.current = 'scored';
+        }
+
+        setTimeout(() => {
+          stepRef.current = (stepRef.current+1) % patternRef.current.indices.length;
+          setCurrentStep(stepRef.current);
+          historyRef.current = [];
+          stepResultRef.current = 'pending';
+          setNoteStatus('listening');
+        }, 100);
+      }
+      beatCountRef.current++;
+    }, 60000 / bpm);
+  }, [isListening, bpm]);
+
+  useEffect(() => () => { stopMetronome(); stopMic(); }, []);
+
+  // ── Derived ──────────────────────────────────────────────────────────────────
+  const pIdx      = pattern.indices;
+  const curIdx    = pIdx[currentStep % pIdx.length];
+  const nextIdx   = pIdx[(currentStep+1) % pIdx.length];
+  const suffix    = chordMode==='min' ? 'm' : chordMode==='dom7' ? '7' : '';
+  const curChord  = CIRCLE[curIdx]+suffix;
+  const nextChord = CIRCLE[nextIdx]+suffix;
+  const accuracy  = score.total > 0 ? Math.round(100*score.correct/score.total) : null;
+
+  const statusColor = noteStatus==='correct' ? '#00E676' : noteStatus==='wrong' ? '#FF1744' : noteStatus==='listening' ? '#FFB300' : '#555';
+  const statusLabel = noteStatus==='correct' ? '✓ Correct !' : noteStatus==='wrong' ? '✗ Raté' : noteStatus==='listening' ? 'Joue…' : '—';
+
+  const S = {
+    container: {
+      fontFamily:"'Georgia','Times New Roman',serif",
+      background:'radial-gradient(ellipse at 30% 20%, #1a0e2e 0%, #0d0d0d 60%)',
+      minHeight:'100vh',
+      color:'#e8dcc8',
+      display:'flex', flexDirection:'column', alignItems:'center',
+      padding:'16px', gap:'12px',
+      userSelect:'none', WebkitUserSelect:'none',
+    },
+    card: (active=false, color='#333') => ({
+      background: active ? `rgba(${hexToRgb(color)},0.12)` : 'rgba(255,255,255,0.03)',
+      border: `${active?2:1}px solid ${active ? color : '#2a2a2a'}`,
+      borderRadius:16, transition:'all 0.2s',
+    }),
+  };
+
+  return (
+    <div style={S.container}>
+
+      {/* Header */}
+      <div style={{ textAlign:'center', paddingTop:8 }}>
+        <div style={{ fontSize:11, letterSpacing:6, color:'#9e8b6e', textTransform:'uppercase', marginBottom:2 }}>
+          Cycle des quintes
+        </div>
+        <h1 style={{ margin:0, fontSize:22, fontWeight:400, letterSpacing:1, color:'#f5e6c8' }}>
+          Quintessence
+        </h1>
+      </div>
+
+      {/* Circle */}
+      <CircleDisplay
+        currentIndex={curIdx} nextIndex={nextIdx}
+        patternIndices={pIdx}
+        isRunning={isRunning} noteStatus={noteStatus} chordMode={chordMode}
+      />
+
+      {/* Current / Next */}
+      <div style={{ display:'flex', gap:16, alignItems:'center', width:'100%', maxWidth:340 }}>
+        <div style={{
+          flex:1, ...S.card(isRunning, statusColor),
+          padding:'12px 8px', textAlign:'center',
+          boxShadow: isRunning ? `0 0 20px ${statusColor}44` : 'none',
+        }}>
+          <div style={{ fontSize:11, letterSpacing:3, color:'#9e8b6e', marginBottom:4 }}>MAINTENANT</div>
+          <div style={{ fontSize:44, fontWeight:300, color:statusColor, lineHeight:1 }}>
+            {isRunning ? curChord : '—'}
+          </div>
+          <div style={{ fontSize:12, color:statusColor, marginTop:4, height:16 }}>
+            {isRunning ? statusLabel : ''}
+          </div>
+        </div>
+
+        <div style={{ display:'flex', flexDirection:'column', gap:6, alignItems:'center' }}>
+          <BeatDots count={beatsPerChord} current={isRunning ? beat : -1} flash={flashBeat} />
+          {isRunning && <div style={{ fontSize:10, color:'#6e5e4e', letterSpacing:2 }}>♩={bpm}</div>}
+        </div>
+
+        <div style={{ flex:0.8, ...S.card(), padding:'12px 8px', textAlign:'center' }}>
+          <div style={{ fontSize:11, letterSpacing:3, color:'#444', marginBottom:4 }}>SUIVANT</div>
+          <div style={{ fontSize:32, fontWeight:300, color:'#6e5e4e', lineHeight:1 }}>
+            {isRunning ? nextChord : '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Detected note */}
+      {isListening && (
+        <div style={{
+          display:'flex', alignItems:'center', gap:10,
+          background:'rgba(255,255,255,0.04)', borderRadius:12,
+          padding:'8px 20px', width:'100%', maxWidth:340, justifyContent:'center',
+        }}>
+          <div style={{
+            width:8, height:8, borderRadius:'50%',
+            background: detectedNote ? '#4CAF50' : '#444',
+            boxShadow: detectedNote ? '0 0 8px #4CAF50' : 'none',
+            transition:'all 0.1s',
+          }} />
+          <span style={{ fontSize:11, color:'#666', letterSpacing:2 }}>DÉTECTÉ</span>
+          <span style={{ fontSize:20, color: detectedNote ? '#c8f0d8' : '#444', minWidth:30, textAlign:'center' }}>
+            {detectedNote || '—'}
+          </span>
+          {accuracy !== null && (
+            <span style={{ fontSize:11, color:'#9e8b6e', marginLeft:'auto', letterSpacing:1 }}>
+              {accuracy}% · {score.correct}/{score.total}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Patterns */}
+      <div style={{ width:'100%', maxWidth:340 }}>
+        <div style={{ fontSize:10, letterSpacing:3, color:'#555', marginBottom:6, textAlign:'center' }}>PATTERN</div>
+        <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+          {PATTERNS.map(p => (
+            <button key={p.id}
+              onClick={() => !isRunning && setPattern(p)}
+              disabled={isRunning}
+              style={{
+                background: pattern.id===p.id ? 'rgba(255,179,0,0.15)' : 'rgba(255,255,255,0.03)',
+                border: pattern.id===p.id ? '1px solid #FFB300' : '1px solid #222',
+                borderRadius:10, padding:'8px 14px',
+                color: pattern.id===p.id ? '#FFB300' : '#6e5e4e',
+                fontSize:12, textAlign:'left', cursor: isRunning ? 'not-allowed' : 'pointer',
+                display:'flex', justifyContent:'space-between', alignItems:'center',
+                transition:'all 0.15s',
+              }}>
+              <span style={{ fontWeight: pattern.id===p.id ? 600 : 400 }}>{p.name}</span>
+              <span style={{ fontSize:10, color:'#443322', fontStyle:'italic' }}>{p.desc}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Settings */}
+      <div style={{ display:'flex', gap:10, width:'100%', maxWidth:340, flexWrap:'wrap' }}>
+        {/* BPM */}
+        <div style={{ flex:1, background:'rgba(255,255,255,0.03)', borderRadius:12, padding:10 }}>
+          <div style={{ fontSize:10, letterSpacing:3, color:'#555', marginBottom:6 }}>BPM</div>
+          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <Btn onClick={() => !isRunning && setBpm(b=>Math.max(30,b-5))}>–</Btn>
+            <span style={{ flex:1, textAlign:'center', fontSize:20, color:'#f5e6c8' }}>{bpm}</span>
+            <Btn onClick={() => !isRunning && setBpm(b=>Math.min(200,b+5))}>+</Btn>
+          </div>
+        </div>
+        {/* Beats/chord */}
+        <div style={{ flex:1, background:'rgba(255,255,255,0.03)', borderRadius:12, padding:10 }}>
+          <div style={{ fontSize:10, letterSpacing:3, color:'#555', marginBottom:6 }}>TEMPS/ACCORD</div>
+          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <Btn onClick={() => !isRunning && setBeatsPerChord(b=>Math.max(1,b-1))}>–</Btn>
+            <span style={{ flex:1, textAlign:'center', fontSize:20, color:'#f5e6c8' }}>{beatsPerChord}</span>
+            <Btn onClick={() => !isRunning && setBeatsPerChord(b=>Math.min(8,b+1))}>+</Btn>
+          </div>
+        </div>
+        {/* Mode */}
+        <div style={{ width:'100%', background:'rgba(255,255,255,0.03)', borderRadius:12, padding:10 }}>
+          <div style={{ fontSize:10, letterSpacing:3, color:'#555', marginBottom:6 }}>MODE D'ACCORD</div>
+          <div style={{ display:'flex', gap:6 }}>
+            {[['maj','Majeur'],['min','Mineur'],['dom7','Dom. 7']].map(([v,l]) => (
+              <button key={v} onClick={() => !isRunning && setChordMode(v)}
+                style={{
+                  flex:1, padding:'6px 4px', borderRadius:8, fontSize:11,
+                  background: chordMode===v ? 'rgba(255,179,0,0.2)' : 'rgba(0,0,0,0.3)',
+                  border: chordMode===v ? '1px solid #FFB300' : '1px solid #333',
+                  color: chordMode===v ? '#FFB300' : '#666', cursor:'pointer',
+                }}>{l}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Main controls */}
+      <div style={{ display:'flex', gap:10, width:'100%', maxWidth:340 }}>
+        <button onClick={isListening ? stopMic : startMic}
+          style={{
+            flex:0.7, padding:'14px 0', borderRadius:14, fontSize:13,
+            background: isListening ? 'rgba(244,67,54,0.2)' : 'rgba(255,255,255,0.06)',
+            border: isListening ? '1px solid #F44336' : '1px solid #444',
+            color: isListening ? '#F44336' : '#9e8b6e', cursor:'pointer', letterSpacing:1,
+          }}>
+          {isListening ? '⏹ Micro' : '🎙 Micro'}
+        </button>
+
+        <button onClick={isRunning ? stopMetronome : startMetronome}
+          style={{
+            flex:1, padding:'14px 0', borderRadius:14, fontSize:14, fontWeight:600,
+            background: isRunning ? 'rgba(255,23,68,0.25)' : 'rgba(255,179,0,0.2)',
+            border: isRunning ? '2px solid #FF1744' : '2px solid #FFB300',
+            color: isRunning ? '#FF6E6E' : '#FFB300', cursor:'pointer', letterSpacing:2,
+            boxShadow: isRunning ? '0 0 20px rgba(255,23,68,0.3)' : '0 0 20px rgba(255,179,0,0.2)',
+            transition:'all 0.2s',
+          }}>
+          {isRunning ? '■ STOP' : '▶ START'}
+        </button>
+
+        {score.total > 0 && !isRunning && (
+          <button onClick={() => setScore({ correct:0, total:0 })}
+            style={{
+              flex:0.5, padding:'14px 4px', borderRadius:14, fontSize:11,
+              background:'rgba(255,255,255,0.04)', border:'1px solid #333',
+              color:'#555', cursor:'pointer', letterSpacing:1,
+            }}>Reset</button>
+        )}
+      </div>
+
+      {/* Score */}
+      {score.total > 0 && (
+        <div style={{ display:'flex', gap:20, justifyContent:'center', padding:'4px 0' }}>
+          <span style={{ fontSize:12, color:'#00E676' }}>✓ {score.correct}</span>
+          <span style={{ fontSize:12, color:'#9e8b6e' }}>{accuracy}% précision</span>
+          <span style={{ fontSize:12, color:'#FF4081' }}>✗ {score.total-score.correct}</span>
+        </div>
+      )}
+
+      {/* Tip */}
+      <div style={{ fontSize:10, color:'#332', textAlign:'center', paddingBottom:16, maxWidth:300 }}>
+        Joue la fondamentale clairement — l'app détecte la note dominante dans la fenêtre temporelle
+      </div>
+    </div>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function Btn({ children, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      width:28, height:28, borderRadius:8, border:'1px solid #333',
+      background:'#1a1a1a', color:'#999', fontSize:16, cursor:'pointer',
+      display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+    }}>{children}</button>
+  );
+}
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1,3),16);
+  const g = parseInt(hex.slice(3,5),16);
+  const b = parseInt(hex.slice(5,7),16);
+  return `${r},${g},${b}`;
+}
+
+// ─── Mount ────────────────────────────────────────────────────────────────────
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
