@@ -998,6 +998,7 @@ function App(){
   const[walkMode,setWalkMode]=useState(WALK_MODES[0]);
   const[walkStartRoot,setWalkStartRoot]=useState(0);
   const[walkStartType,setWalkStartType]=useState('maj');
+  const[walkTypeFilter,setWalkTypeFilter]=useState(new Set(['maj','min','dom7','aug']));
 
   // ── Exercise settings ──────────────────────────────────
   const[bpm,setBpm]=useState(72);
@@ -1018,6 +1019,7 @@ function App(){
   const[beatFlash,setBeatFlash]=useState(false);
   const[noteStatus,setStatus]=useState('idle');
   const[detChord,setDetChord]=useState(null);
+  const[isSilent,setIsSilent]=useState(true);
   const[score,setScore]=useState({correct:0,total:0});
   const[walkHistory,setWalkHistory]=useState([]);
   const[currentWalkId,setCurrentWalkId]=useState(()=>nid(0,'maj'));
@@ -1035,6 +1037,7 @@ function App(){
   const stepRef=useRef(0);
   const walkIdRef=useRef(nid(0,'maj'));
   const walkHistRef=useRef([]);
+  const precomputedNextIdRef=useRef(null); // deterministic next chord for walk
   const lastDetRef=useRef(null); // BUG FIX #5 — dedicated ref for score eval
   const scoreRef=useRef({correct:0,total:0});
   const sessStartRef=useRef(null);
@@ -1048,6 +1051,7 @@ function App(){
   const progressionRef=useRef(progression);
   const transpRef=useRef(transposeKey);
   const walkModeRef=useRef(walkMode);
+  const walkTypeFilterRef=useRef(walkTypeFilter);
   const autoTempoRef=useRef(autoTempo);
   const autoTempoBarsRef=useRef(autoTempoBars);
   const autoTempoStepRef=useRef(autoTempoStep);
@@ -1061,6 +1065,7 @@ function App(){
   useEffect(()=>{progressionRef.current=progression;},[progression]);
   useEffect(()=>{transpRef.current=transposeKey;},[transposeKey]);
   useEffect(()=>{walkModeRef.current=walkMode;},[walkMode]);
+  useEffect(()=>{walkTypeFilterRef.current=walkTypeFilter;},[walkTypeFilter]);
   useEffect(()=>{autoTempoRef.current=autoTempo;},[autoTempo]);
   useEffect(()=>{autoTempoBarsRef.current=autoTempoBars;},[autoTempoBars]);
   useEffect(()=>{autoTempoStepRef.current=autoTempoStep;},[autoTempoStep]);
@@ -1075,15 +1080,37 @@ function App(){
     return progChords[step%progChords.length];
   },[sourceMode,currentWalkId,progChords,step]);
 
-  // BUG FIX #3,#8 — nextChord uses walkIdRef not state, no histRef in memo
+  const[nextWalkIdState,setNextWalkIdState]=useState(null);
+
+  // Compute next chord once, store in ref AND state (both used)
+  const computeNextWalk=useCallback((fromId,hist,filter)=>{
+    for(let attempt=0;attempt<8;attempt++){
+      const candidate=nextNodeFn(fromId,walkModeRef.current.id,hist);
+      if(!candidate)break;
+      const{type}=parseNid(candidate);
+      if(filter.size===0||filter.has(type)){
+        precomputedNextIdRef.current=candidate;
+        setNextWalkIdState(candidate);
+        return candidate;
+      }
+    }
+    // fallback: same root, random allowed type
+    const{root}=parseNid(fromId);
+    const allowed=[...(filter.size>0?filter:new Set(['maj']))];
+    const fb=nid(root,allowed[Math.floor(Math.random()*allowed.length)]);
+    precomputedNextIdRef.current=fb;
+    setNextWalkIdState(fb);
+    return fb;
+  },[]);
+
+  // BUG FIX — nextChordDisplay is now deterministic (pre-computed, not re-rolled each render)
   const nextChordDisplay=useMemo(()=>{
     if(sourceMode==='walk'){
-      const nxtId=nextNodeFn(walkIdRef.current,walkMode.id,walkHistRef.current);
-      if(!nxtId)return null;
-      const n=parseNid(nxtId);return{root:n.root,type:n.type};
+      if(!nextWalkIdState)return null;
+      const n=parseNid(nextWalkIdState);return{root:n.root,type:n.type};
     }
     return progChords[(step+1)%progChords.length];
-  },[sourceMode,currentWalkId,walkMode,progChords,step]);// currentWalkId triggers recompute when walk advances
+  },[sourceMode,nextWalkIdState,progChords,step]);
 
   const activeRoots=useMemo(()=>{
     if(sourceMode==='walk')return new Set(Array.from({length:12},(_,i)=>i));
@@ -1115,11 +1142,11 @@ function App(){
         const midMax=Math.max(...Array.from(fd).slice(10,400));
         if(midMax>-75){
           const det=detectChord(buildChroma(fd,sr,fftSz));
-          lastDetRef.current=det;// BUG FIX #5
-          setDetChord(det);
+          if(det){lastDetRef.current=det;setDetChord(det);}
+          setIsSilent(!det);
         }else{
-          lastDetRef.current=null;
-          setDetChord(null);
+          setIsSilent(true);
+          // Keep lastDetRef and detChord — don't clear, chord stays visible
         }
         rafRef.current=requestAnimationFrame(poll);
       };
@@ -1137,6 +1164,7 @@ function App(){
     analyserRef.current=null;
     setListening(false);
     setDetChord(null);
+    setIsSilent(true);
     lastDetRef.current=null;
   },[]);
 
@@ -1179,12 +1207,16 @@ function App(){
 
   function advanceStep(){
     if(sourceModeRef.current==='walk'){
-      const nxt=nextNodeFn(walkIdRef.current,walkModeRef.current.id,walkHistRef.current);
+      // Use the pre-computed next chord (same one shown in display)
+      const nxt=precomputedNextIdRef.current||nextNodeFn(walkIdRef.current,walkModeRef.current.id,walkHistRef.current);
       if(nxt){
         walkIdRef.current=nxt;
-        walkHistRef.current=[...walkHistRef.current.slice(-20),nxt];
+        const newHist=[...walkHistRef.current.slice(-20),nxt];
+        walkHistRef.current=newHist;
         setCurrentWalkId(nxt);
         setWalkHistory(h=>[...h.slice(-20),nxt]);
+        // Pre-compute the NEXT next chord immediately
+        computeNextWalk(nxt,newHist,walkTypeFilterRef.current);
       }
     }else{
       stepRef.current=(stepRef.current+1)%progressionRef.current.chords.length;
@@ -1208,6 +1240,9 @@ function App(){
   function runScheduler(){
     if(!audioCtxRef.current)return;
     const ctx=audioCtxRef.current;
+    // Fix: resume AudioContext if suspended (iOS background, user interaction gap)
+    if(ctx.state==='suspended')ctx.resume();
+    if(ctx.state==='closed')return;
     while(nextBeatTimeRef.current<ctx.currentTime+LOOKAHEAD){
       const beat=beatCountRef.current%bpcRef.current;
       const t=nextBeatTimeRef.current;
@@ -1263,6 +1298,8 @@ function App(){
     walkHistRef.current=[startKey];
     setCurrentWalkId(startKey);
     setWalkHistory([startKey]);
+    // Pre-compute first "next" chord immediately
+    computeNextWalk(startKey,[startKey],walkTypeFilter);
     stepRef.current=0;beatCountRef.current=0;barCountRef.current=0;
     evalDoneRef.current=false;
     setStep(0);setBeat(0);setStatus('listening');setScore({correct:0,total:0});
@@ -1362,11 +1399,11 @@ function App(){
             {/* Analyse: confidence */}
             {appMode==='analyse'&&analyseChord&&(
               <div style={{textAlign:'right'}}>
-                <div style={{fontSize:8,color:'#2a2a3a',letterSpacing:1}}>CONFIANCE</div>
+                <div style={{fontSize:8,color:'#2a2a3a',letterSpacing:1}}>{isSilent?'SILENCE':'CONFIANCE'}</div>
                 <div style={{fontSize:18,fontWeight:200,
-                  color:analyseChord.score>0.5?'#00E676':analyseChord.score>0.25?'#FFB300':'#FF4081',
-                  fontFamily:'Georgia,serif'}}>
-                  {Math.round(Math.min(100,analyseChord.score*100))}%
+                  color:isSilent?'#2a2a3a':analyseChord.score>0.5?'#00E676':analyseChord.score>0.25?'#FFB300':'#FF4081',
+                  fontFamily:'Georgia,serif',transition:'color .3s'}}>
+                  {isSilent?'—':Math.round(Math.min(100,analyseChord.score*100))+'%'}
                 </div>
               </div>
             )}
@@ -1408,18 +1445,19 @@ function App(){
       {appMode==='exercise'&&isListening&&(
         <div style={{background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 11px',display:'flex',alignItems:'center',gap:9}}>
           <div style={{width:7,height:7,borderRadius:'50%',flexShrink:0,
-            background:detChord?'#4CAF50':'#1a1a28',
-            boxShadow:detChord?'0 0 8px #4CAF5088':'none',transition:'all .1s'}}/>
+            background:!isSilent&&detChord?'#4CAF50':detChord?'#2a4a30':'#1a1a28',
+            boxShadow:!isSilent&&detChord?'0 0 8px #4CAF5088':'none',transition:'all .15s'}}/>
           <div style={{flex:1}}>
             <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>
               FFT DÉTECTÉ
-              {detChord&&<span style={{marginLeft:8,color:'#1a3020',fontSize:7}}>
+              {detChord&&!isSilent&&<span style={{marginLeft:8,color:'#1a3020',fontSize:7}}>
                 {Math.round(Math.min(100,detChord.score*100))}%
               </span>}
+              {isSilent&&detChord&&<span style={{marginLeft:8,color:'#2a1a1a',fontSize:7}}>SILENCE</span>}
             </div>
-            <div style={{fontSize:15,color:detChord?'#c8e8d0':'#252535',fontFamily:'Georgia,serif'}}>
+            <div style={{fontSize:15,color:detChord?(!isSilent?'#c8e8d0':'#4a6050'):'#252535',fontFamily:'Georgia,serif',transition:'color .3s'}}>
               {detChord?chordName(detChord.root,detChord.type,usesFlat(detChord.root)):'—'}
-              {detChord&&<span style={{fontSize:9,color:'#2a3a2e',marginLeft:5}}>{Q[detChord.type]?.label}</span>}
+              {detChord&&<span style={{fontSize:9,color:isSilent?'#2a3a2e':'#4a6a50',marginLeft:5}}>{Q[detChord.type]?.label}</span>}
             </div>
             {detChord&&<div style={{height:2,background:'#0a120e',borderRadius:1,marginTop:3,overflow:'hidden'}}>
               <div style={{height:'100%',width:`${Math.min(100,detChord.score*100)}%`,
@@ -1466,6 +1504,29 @@ function App(){
                 {wm.name}
               </button>
             ))}
+          </div>
+          {/* Chord type zone filter */}
+          <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>ZONES D'ACCORDS</div>
+          <div style={{display:'flex',gap:3}}>
+            {['maj','min','dom7','aug'].map(t=>{
+              const q=Q[t];
+              const active=walkTypeFilter.has(t);
+              return(
+                <button key={t} onClick={()=>!isRunning&&setWalkTypeFilter(prev=>{
+                  const next=new Set(prev);
+                  if(active&&next.size>1)next.delete(t);else next.add(t);
+                  return next;
+                })}
+                  style={{flex:1,padding:'5px 4px',borderRadius:7,fontSize:9,letterSpacing:.3,
+                    background:active?q.color+'22':'rgba(255,255,255,.02)',
+                    border:active?`1px solid ${q.color}55`:'1px solid #141420',
+                    color:active?q.color:'#2a2a3a',
+                    cursor:isRunning?'not-allowed':'pointer',
+                    transition:'all .15s'}}>
+                  {q.label}
+                </button>
+              );
+            })}
           </div>
           <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>DÉPART</div>
           <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
@@ -1558,7 +1619,7 @@ function App(){
       {/* ── Settings (exercise) ── */}
       {appMode==='exercise'&&(
         <div style={{display:'flex',gap:6}}>
-          {[['BPM',displayBpm,v=>setBpm(v),40,220,5],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,stp])=>(
+          {[['BPM',displayBpm,v=>{setBpm(v);setDisplayBpm(v);},40,220,5],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,stp])=>(
             <div key={lbl} style={{flex:1,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 9px'}}>
               <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:4}}>{lbl}</div>
               <div style={{display:'flex',alignItems:'center',gap:4}}>
@@ -1657,7 +1718,7 @@ function App(){
         {viewMode==='network'&&(
           <NetworkSVG W={vizW} H={vizH}
             currentId={isRunning?currentWalkId:null}
-            nextId={isRunning?nid(...Object.values(parseNid(nextNodeFn(currentWalkId,walkMode.id,walkHistRef.current)||currentWalkId))):null}
+            nextId={isRunning&&nextWalkIdState?nextWalkIdState:null}
             history={walkHistory}
             noteStatus={noteStatus}/>
         )}
