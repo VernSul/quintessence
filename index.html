@@ -1388,27 +1388,25 @@ setStatus(‘listening’);
 setScaleIdx(0);
 },[]);
 
-```
-if(!isListening){alert('Activez le micro d\'abord !');return;}
+const startMetronome=useCallback(()=>{
+if(!isListening){alert(‘Activez le micro d'abord !’);return;}
 const startKey=nid(walkStartRoot,walkStartType);
 walkIdRef.current=startKey;
 walkHistRef.current=[startKey];
 setCurrentWalkId(startKey);
 setWalkHistory([startKey]);
-// Pre-compute first "next" chord immediately
+// Pre-compute first “next” chord immediately
 computeNextWalk(startKey,[startKey],walkTypeFilter);
 stepRef.current=0;beatCountRef.current=0;barCountRef.current=0;
 evalDoneRef.current=false;
-setStep(0);setBeat(0);setStatus('listening');setScore({correct:0,total:0});
+setStep(0);setBeat(0);setStatus(‘listening’);setScore({correct:0,total:0});
 scoreRef.current={correct:0,total:0};
 sessStartRef.current=Date.now();
-sessNameRef.current=sourceMode==='walk'?`Walk — ${walkMode.name}`:progression.name;
+sessNameRef.current=sourceMode===‘walk’?`Walk — ${walkMode.name}`:progression.name;
 setRunning(true);
 if(autoTempo){setBpm(bpm);setDisplayBpm(bpm);bpmRef.current=bpm;displayBpmRef.current=bpm;}
 nextBeatTimeRef.current=audioCtxRef.current.currentTime+0.05;
 runScheduler();
-```
-
 },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo]);
 
 useEffect(()=>()=>{stopMetronome();stopMic();},[]);
