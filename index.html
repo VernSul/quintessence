@@ -471,6 +471,18 @@ function buildNetwork(){
 }
 const NETWORK=buildNetwork();
 
+// Find relationship between two chords
+function findChordRelation(fromRoot,fromType,toRoot,toType){
+  const fromId=nid(fromRoot,fromType);
+  const toId=nid(toRoot,toType);
+  const edge=NETWORK.edges.find(e=>e.from===fromId&&e.to===toId);
+  if(edge)return edge.rel;
+  // Calculate interval
+  const interval=((toRoot-fromRoot)+12)%12;
+  const intervals={0:'',1:'♭2',2:'2',3:'♭3',4:'3',5:'4',6:'TT',7:'5',8:'♭6',9:'6',10:'♭7',11:'7'};
+  return intervals[interval]||'';
+}
+
 // BUG FIX #2 — renamed param from nodeId to nodeKey
 function getSuccessors(nodeKey){
   const edges=NETWORK.edges.filter(e=>e.from===nodeKey);
@@ -1755,9 +1767,10 @@ function App(){
     sessNameRef.current=sourceMode==='walk'?`Walk — ${walkMode.name}`:progression.name;
     setRunning(true);
     if(autoTempo){setBpm(bpm);setDisplayBpm(bpm);bpmRef.current=bpm;displayBpmRef.current=bpm;}
+    if(!audioCtxRef.current){alert("Erreur: contexte audio manquant");return;}
     nextBeatTimeRef.current=audioCtxRef.current.currentTime+0.05;
     runScheduler();
-  },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo]);
+  },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo,walkTypeFilter]);
 
   useEffect(()=>()=>{stopMetronome();stopMic();},[]);
 
@@ -1837,6 +1850,7 @@ function App(){
             {appMode==='exercise'&&isRunning&&nextChordDisplay&&(
               <div style={{textAlign:'right'}}>
                 <div style={{fontSize:7,color:'#2a2a3a',letterSpacing:2}}>SUIVANT</div>
+                {currentChord&&<div style={{fontSize:9,color:'#FFB30088',fontStyle:'italic',marginTop:1}}>{findChordRelation(currentChord.root,currentChord.type,nextChordDisplay.root,nextChordDisplay.type)}</div>}
                 <div style={{fontSize:20,fontWeight:200,fontFamily:'Georgia,serif',
                   color:Q[nextChordDisplay.type]?.color+'66'}}>
                   {chordName(nextChordDisplay.root,nextChordDisplay.type,usesFlat(nextChordDisplay.root))}
@@ -2067,7 +2081,7 @@ function App(){
       {/* ── Settings (exercise) ── */}
       {appMode==='exercise'&&(
         <div style={{display:'flex',gap:6}}>
-          {[['BPM',displayBpm,v=>{setBpm(v);setDisplayBpm(v);},40,220,5],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,stp])=>(
+          {[['BPM',displayBpm,v=>{setBpm(v);setDisplayBpm(v);},40,220,1],['TEMPS',bpc,v=>setBpc(v),1,8,1]].map(([lbl,val,setter,mn,mx,stp])=>(
             <div key={lbl} style={{flex:1,background:'rgba(255,255,255,.02)',border:'1px solid #141420',borderRadius:10,padding:'6px 9px'}}>
               <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e',marginBottom:4}}>{lbl}</div>
               <div style={{display:'flex',alignItems:'center',gap:4}}>
