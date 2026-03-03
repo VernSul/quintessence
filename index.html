@@ -615,9 +615,9 @@ function parseChordText(txt){
   else if(/^dim7|^o7|^°7/.test(rest))type='dim7';
   else if(/^dim|^o|^°/.test(rest))type='dim';
   else if(/^aug|^\+/.test(rest))type='aug';
-  else if(/^m(in)?7|^-7/.test(rest))type='min7';
-  else if(/^m(in)?|^-/.test(rest))type='min';
   else if(/^maj7|^M7|^Δ7|^△7/.test(rest))type='maj7';
+  else if(/^m(in)?7|^-7/.test(rest))type='min7';
+  else if(/^min|^mi(?!n)|^m(?![ao])|^-/.test(rest))type='min';
   else if(/^7|^dom7/.test(rest))type='dom7';
   else if(/^maj|^M/.test(rest))type='maj';
   return{root,type};
