@@ -414,6 +414,66 @@ const CHORD_SCALES={
   min7b5: ['locrian','alt','dim_sym'],// BUG FIX #1 — locrian now exists
 };
 
+// ═══════════════════════════════════════════════════════════
+// DIATONIC 7TH CHORDS & TONAL ANALYSIS
+// ═══════════════════════════════════════════════════════════
+// Major scale intervals: W W H W W W H
+const MAJOR_SCALE=[0,2,4,5,7,9,11];
+// Diatonic 7th chord types for each degree of the major scale
+const DIATONIC_7TH_TYPES=['maj7','min7','min7','maj7','dom7','min7','min7b5'];
+// Roman numerals
+const ROMAN_NUMERALS=['I','II','III','IV','V','VI','VII'];
+
+// Build diatonic 7th chords for a given key (root = 0-11, mode = 'maj' or 'min')
+function getDiatonic7thChords(keyRoot,mode='maj'){
+  const base=mode==='min'?[0,2,3,5,7,8,10]:[0,2,4,5,7,9,11]; // natural minor or major
+  const types7=mode==='min'
+    ?['min7','min7b5','maj7','min7','min7','maj7','dom7'] // natural minor diatonic 7ths
+    :['maj7','min7','min7','maj7','dom7','min7','min7b5'];
+  return base.map((interval,i)=>({
+    root:m12(keyRoot,interval),
+    type:types7[i],
+    degree:i,
+  }));
+}
+
+// Determine the Roman numeral function of a chord within a key
+function chordDegreeInKey(chordRoot,chordType,keyRoot,keyMode='maj'){
+  const chords=getDiatonic7thChords(keyRoot,keyMode);
+  for(const c of chords){
+    if(c.root===chordRoot){
+      const roman=ROMAN_NUMERALS[c.degree];
+      // Match type loosely (maj/maj7, min/min7, etc.)
+      const MAJ_FAMILY=['maj','maj7'];
+      const MIN_FAMILY=['min','min7'];
+      const DOM_FAMILY=['dom7'];
+      const DIM_FAMILY=['dim7','min7b5'];
+      const typeMatch=(a,b)=>{
+        if(MAJ_FAMILY.includes(a)&&MAJ_FAMILY.includes(b))return true;
+        if(MIN_FAMILY.includes(a)&&MIN_FAMILY.includes(b))return true;
+        if(DOM_FAMILY.includes(a)&&DOM_FAMILY.includes(b))return true;
+        if(DIM_FAMILY.includes(a)&&DIM_FAMILY.includes(b))return true;
+        return a===b;
+      };
+      if(typeMatch(c.type,chordType)){
+        // Uppercase for major/dom, lowercase for minor/dim
+        const isMinor=['min','min7','min7b5','dim7'].includes(c.type);
+        return{degree:c.degree,roman:isMinor?roman.toLowerCase():roman,exact:c.type===chordType};
+      }
+    }
+  }
+  // Secondary dominant check: V7/X
+  for(let d=0;d<7;d++){
+    const target=chords[d];
+    const secDomRoot=m12(target.root,7); // V of target
+    if(chordRoot===secDomRoot&&(chordType==='dom7'||chordType==='maj')){
+      const targetRoman=ROMAN_NUMERALS[d];
+      return{degree:-1,roman:`V/${targetRoman}`,exact:false};
+    }
+  }
+  return null;
+}
+
 // Shell & rootless voicings
 const VOICINGS={
   maj:    {shell:[0,4,7],    rootless:[4,7,11,2],  label:'Shell 1-3-5'},
@@ -444,7 +504,7 @@ function buildNetwork(){
   const nodes=[];
   const edges=[];
   const edgeSet=new Set();
-  for(let r=0;r<12;r++)for(const t of['maj','min','dom7','aug'])nodes.push({id:nid(r,t),root:r,type:t});
+  for(let r=0;r<12;r++)for(const t of['maj','min','dom7','aug','maj7','min7','min7b5','dim7'])nodes.push({id:nid(r,t),root:r,type:t});
   function addEdge(fr,ft,tr,tt,w,rel){
     const f=nid(fr,ft),t=nid(tr,tt),key=`${f}→${t}`;
     if(!edgeSet.has(key)){edgeSet.add(key);edges.push({from:f,to:t,weight:w,rel});}
@@ -466,6 +526,16 @@ function buildNetwork(){
     addEdge(r,'dom7',m12(r,7),'dom7',2,'V7/V7');// BUG FIX: was m12(r,5) = circle up not down
     addEdge(r,'maj',m12(r,5),'maj',2,'I→IV');
     addEdge(r,'min',m12(r,5),'min',2,'Im→IVm');
+    // 7th chord edges
+    addEdge(r,'min7',m12(r,5),'dom7',1,'IIm7→V7');
+    addEdge(r,'dom7',m12(r,5),'maj7',1,'V7→Imaj7');
+    addEdge(r,'dom7',m12(r,5),'min7',1,'V7→Im7');
+    addEdge(r,'maj7',m12(r,7),'dom7',1,'I7→V7');
+    addEdge(r,'maj7',m12(r,2),'min7',1,'I7→IIm7');
+    addEdge(r,'min7',m12(r,3),'maj7',2,'rel7');
+    addEdge(r,'maj7',m12(r,9),'min7',2,'rel7');
+    addEdge(r,'min7b5',m12(r,5),'dom7',1,'vii→V7');
+    addEdge(r,'dim7',m12(r,1),'maj7',1,'dim→I7');
   }
   return{nodes,edges};
 }
@@ -517,6 +587,7 @@ function computeLayout(W,H){
 // ═══════════════════════════════════════════════════════════
 const WALK_MODES=[
   {id:'free',      name:'Libre',          desc:'Marche pondérée sur le réseau harmonique'},
+  {id:'tonal',     name:'Tonal 7th',      desc:'Accords diatoniques 7èmes dans les tonalités sélectionnées'},
   {id:'251',       name:'II–V–I',         desc:'Enchaîne des II–V–I dans des tonalités changeantes'},
   {id:'dom_chain', name:'Chaîne dom7',    desc:'Cascade de dominantes qui résolvent'},
   {id:'rel',       name:'Relatifs',       desc:'Oscille majeur↔mineur relatifs'},
@@ -527,19 +598,42 @@ const WALK_MODES=[
 // BUG FIX #4 — 251 mode completely rewritten
 // We track a tonal center that shifts. Each 3-step cycle: IIm→V7→Imaj
 // Then tonal center shifts randomly by a 5th or other jazz motion
-function nextNodeFn(currentKey,mode,history){
+// _tonalKeys: array of {root,mode} e.g. [{root:0,mode:'maj'},{root:9,mode:'min'}]
+// _tonalState: {keyIdx,degreeIdx} — persisted across calls via ref
+function nextNodeFn(currentKey,mode,history,_tonalKeys,_tonalState){
   const{root,type}=parseNid(currentKey);
+  if(mode==='tonal'&&_tonalKeys&&_tonalKeys.length>0&&_tonalState){
+    const tk=_tonalKeys[_tonalState.keyIdx%_tonalKeys.length];
+    const chords=getDiatonic7thChords(tk.root,tk.mode);
+    _tonalState.degreeIdx++;
+    // After cycling through some chords in this key, switch to next key
+    if(_tonalState.degreeIdx>=chords.length){
+      _tonalState.degreeIdx=0;
+      _tonalState.keyIdx=(_tonalState.keyIdx+1)%_tonalKeys.length;
+      const nextTk=_tonalKeys[_tonalState.keyIdx];
+      const nextChords=getDiatonic7thChords(nextTk.root,nextTk.mode);
+      const c=nextChords[0];
+      return nid(c.root,c.type);
+    }
+    // Pick next diatonic chord — common progressions weighted
+    const weights=[0,3,5,2,4,1,6]; // I,IV,VI,II,V,ii,vii — jazz-friendly order
+    const pool=weights.filter(d=>d!==_tonalState.degreeIdx-1); // avoid repeating same degree
+    const pick=pool[Math.floor(Math.random()*pool.length)];
+    _tonalState.degreeIdx=Math.min(_tonalState.degreeIdx,chords.length-1);
+    const c=chords[pick%chords.length];
+    return nid(c.root,c.type);
+  }
   if(mode==='251'){
     const step=history.length%3;
-    if(step===0) return nid(m12(root,2),'min');   // II: up a maj2 from tonic
-    if(step===1) return nid(m12(root,5),'dom7');  // V: up a 4th from II = 5th from tonic
-    // I: down a 5th from V = back to tonic, sometimes shift tonal center
+    if(step===0) return nid(m12(root,2),'min7');   // IIm7: up a maj2 from tonic
+    if(step===1) return nid(m12(root,5),'dom7');   // V7: up a 4th from II = 5th from tonic
+    // Imaj7: down a 5th from V = back to tonic, sometimes shift tonal center
     const shift=[0,5,7,2,10][Math.floor(Math.random()*5)];
-    return nid(m12(root,shift-7),'maj');
+    return nid(m12(root,shift-7),'maj7');
   }
   if(mode==='dom_chain'){
     if(type==='dom7'&&Math.random()>.3) return nid(m12(root,5),'dom7');
-    return nid(m12(root,5),Math.random()>.4?'maj':'min');
+    return nid(m12(root,5),Math.random()>.4?'maj7':'min7');
   }
   if(mode==='rel'){
     if(type==='maj') return nid(m12(root,9),'min');
@@ -1511,7 +1605,11 @@ function App(){
   const[walkMode,setWalkMode]=useState(WALK_MODES[0]);
   const[walkStartRoot,setWalkStartRoot]=useState(0);
   const[walkStartType,setWalkStartType]=useState('maj');
-  const[walkTypeFilter,setWalkTypeFilter]=useState(new Set(['maj','min','dom7','aug']));
+  const[walkTypeFilter,setWalkTypeFilter]=useState(new Set(['maj','min','dom7','aug','maj7','min7','min7b5','dim7']));
+  // Tonal mode: selected tonalities to cycle through
+  const[tonalKeys,setTonalKeys]=useState([{root:0,mode:'maj'}]);
+  const[currentTonalKey,setCurrentTonalKey]=useState({root:0,mode:'maj'});
+  const[currentDegreeInfo,setCurrentDegreeInfo]=useState(null); // {roman,degree}
 
   // ── Exercise settings ──────────────────────────────────
   const[bpm,setBpm]=useState(72);
@@ -1570,6 +1668,8 @@ function App(){
   const autoTempoRef=useRef(autoTempo);
   const autoTempoBarsRef=useRef(autoTempoBars);
   const autoTempoStepRef=useRef(autoTempoStep);
+  const tonalKeysRef=useRef(tonalKeys);
+  const tonalStateRef=useRef({keyIdx:0,degreeIdx:0});
   const barCountRef=useRef(0);
   const displayBpmRef=useRef(bpm);
 
@@ -1582,6 +1682,7 @@ function App(){
   useEffect(()=>{walkModeRef.current=walkMode;},[walkMode]);
   useEffect(()=>{walkTypeFilterRef.current=walkTypeFilter;},[walkTypeFilter]);
   useEffect(()=>{autoTempoRef.current=autoTempo;},[autoTempo]);
+  useEffect(()=>{tonalKeysRef.current=tonalKeys;},[tonalKeys]);
   useEffect(()=>{autoTempoBarsRef.current=autoTempoBars;},[autoTempoBars]);
   useEffect(()=>{autoTempoStepRef.current=autoTempoStep;},[autoTempoStep]);
 
@@ -1599,13 +1700,23 @@ function App(){
 
   // Compute next chord once, store in ref AND state (both used)
   const computeNextWalk=useCallback((fromId,hist,filter)=>{
+    const isTonal=walkModeRef.current.id==='tonal';
     for(let attempt=0;attempt<8;attempt++){
-      const candidate=nextNodeFn(fromId,walkModeRef.current.id,hist);
+      const candidate=nextNodeFn(fromId,walkModeRef.current.id,hist,tonalKeysRef.current,tonalStateRef.current);
       if(!candidate)break;
       const{type}=parseNid(candidate);
-      if(filter.size===0||filter.has(type)){
+      // In tonal mode, skip the type filter — the mode controls chord types
+      if(isTonal||filter.size===0||filter.has(type)){
         precomputedNextIdRef.current=candidate;
         setNextWalkIdState(candidate);
+        // Update tonal key display
+        if(isTonal&&tonalKeysRef.current.length>0){
+          const tk=tonalKeysRef.current[tonalStateRef.current.keyIdx%tonalKeysRef.current.length];
+          setCurrentTonalKey(tk);
+          const{root:cr,type:ct}=parseNid(candidate);
+          const deg=chordDegreeInKey(cr,ct,tk.root,tk.mode);
+          setCurrentDegreeInfo(deg);
+        }
         return candidate;
       }
     }
@@ -1732,7 +1843,7 @@ function App(){
   function advanceStep(){
     if(sourceModeRef.current==='walk'){
       // Use the pre-computed next chord (same one shown in display)
-      const nxt=precomputedNextIdRef.current||nextNodeFn(walkIdRef.current,walkModeRef.current.id,walkHistRef.current);
+      const nxt=precomputedNextIdRef.current||nextNodeFn(walkIdRef.current,walkModeRef.current.id,walkHistRef.current,tonalKeysRef.current,tonalStateRef.current);
       if(nxt){
         walkIdRef.current=nxt;
         const newHist=[...walkHistRef.current.slice(-20),nxt];
@@ -1867,7 +1978,18 @@ function App(){
 
   const startMetronome=useCallback(()=>{
     if(!isListening){alert('Activez le micro d\'abord !');return;}
-    const startKey=nid(walkStartRoot,walkStartType);
+    // For tonal mode, start on the I chord of the first selected tonality
+    let effectiveStartRoot=walkStartRoot,effectiveStartType=walkStartType;
+    if(walkMode.id==='tonal'&&tonalKeys.length>0){
+      tonalStateRef.current={keyIdx:0,degreeIdx:0};
+      const firstKey=tonalKeys[0];
+      const firstChords=getDiatonic7thChords(firstKey.root,firstKey.mode);
+      effectiveStartRoot=firstChords[0].root;
+      effectiveStartType=firstChords[0].type;
+      setCurrentTonalKey(firstKey);
+      setCurrentDegreeInfo({degree:0,roman:'I',exact:true});
+    }
+    const startKey=nid(effectiveStartRoot,effectiveStartType);
     walkIdRef.current=startKey;
     walkHistRef.current=[startKey];
     setCurrentWalkId(startKey);
@@ -1885,7 +2007,7 @@ function App(){
     if(!audioCtxRef.current){alert("Erreur: contexte audio manquant");return;}
     nextBeatTimeRef.current=audioCtxRef.current.currentTime+0.05;
     runScheduler();
-  },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo,walkTypeFilter]);
+  },[isListening,walkStartRoot,walkStartType,sourceMode,walkMode,progression,bpm,autoTempo,walkTypeFilter,tonalKeys]);
 
   useEffect(()=>()=>{stopMetronome();stopMic();},[]);
 
@@ -1944,6 +2066,20 @@ function App(){
               {(isRunning&&currentChord)?Q[currentChord.type]?.label:
                analyseChord?Q[analyseChord.type]?.label:''}
             </div>
+            {/* Tonality & degree display */}
+            {isRunning&&currentDegreeInfo&&sourceMode==='walk'&&walkMode.id==='tonal'&&(
+              <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4}}>
+                <div style={{padding:'2px 8px',borderRadius:6,
+                  background:'rgba(158,135,110,.12)',border:'1px solid #9e876e44',
+                  fontSize:10,color:'#c8b090',letterSpacing:1,fontFamily:'Georgia,serif'}}>
+                  {nn(currentTonalKey.root,usesFlat(currentTonalKey.root))}{currentTonalKey.mode==='min'?'m':''} {currentTonalKey.mode==='min'?'mineur':'Majeur'}
+                </div>
+                <div style={{fontSize:16,fontWeight:600,color:'#e8d8c0',fontFamily:'Georgia,serif',
+                  textShadow:'0 0 12px rgba(232,216,192,.3)'}}>
+                  {currentDegreeInfo.roman}
+                </div>
+              </div>
+            )}
           </div>
           <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:5}}>
             {/* Beat indicator */}
@@ -2082,7 +2218,61 @@ function App(){
               </button>
             ))}
           </div>
+          {/* Tonality selector (tonal mode) */}
+          {walkMode.id==='tonal'&&(
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>TONALITES (cliquer pour ajouter/retirer)</div>
+              <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+                {NOTES_FLAT.map((n,i)=>{
+                  const hasMaj=tonalKeys.some(k=>k.root===i&&k.mode==='maj');
+                  const hasMin=tonalKeys.some(k=>k.root===i&&k.mode==='min');
+                  return(
+                    <div key={i} style={{display:'flex',flexDirection:'column',gap:1,alignItems:'center'}}>
+                      <button onClick={()=>!isRunning&&setTonalKeys(prev=>{
+                        const idx=prev.findIndex(k=>k.root===i&&k.mode==='maj');
+                        if(idx>=0){if(prev.length>1)return prev.filter((_,j)=>j!==idx);return prev;}
+                        return[...prev,{root:i,mode:'maj'}];
+                      })}
+                        style={{padding:'3px 6px',borderRadius:5,fontSize:9,fontFamily:'Georgia,serif',
+                          background:hasMaj?'rgba(255,138,216,.2)':'rgba(255,255,255,.02)',
+                          border:hasMaj?'1px solid #FF8AD855':'1px solid #141420',
+                          color:hasMaj?'#FF8AD8':'#2a2a3a',
+                          cursor:isRunning?'not-allowed':'pointer',minWidth:28}}>
+                        {n}
+                      </button>
+                      <button onClick={()=>!isRunning&&setTonalKeys(prev=>{
+                        const idx=prev.findIndex(k=>k.root===i&&k.mode==='min');
+                        if(idx>=0){if(prev.length>1)return prev.filter((_,j)=>j!==idx);return prev;}
+                        return[...prev,{root:i,mode:'min'}];
+                      })}
+                        style={{padding:'2px 5px',borderRadius:4,fontSize:8,fontFamily:'Georgia,serif',
+                          background:hasMin?'rgba(77,166,255,.2)':'rgba(255,255,255,.02)',
+                          border:hasMin?'1px solid #4DA6FF55':'1px solid #141420',
+                          color:hasMin?'#4DA6FF':'#1a1a2a',
+                          cursor:isRunning?'not-allowed':'pointer',minWidth:28}}>
+                        {n}m
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Show selected tonalities */}
+              <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                {tonalKeys.map((tk,i)=>{
+                  const col=tk.mode==='maj'?'#FF8AD8':'#4DA6FF';
+                  return(
+                    <div key={i} style={{padding:'3px 8px',borderRadius:6,
+                      background:col+'18',border:`1px solid ${col}44`,
+                      fontSize:10,color:col,fontFamily:'Georgia,serif'}}>
+                      {nn(tk.root,usesFlat(tk.root))}{tk.mode==='min'?'m':''} {tk.mode==='min'?'min':'Maj'}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {/* Chord type zone filter */}
+          {walkMode.id!=='tonal'&&<>
           <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>ZONES D'ACCORDS</div>
           <div style={{display:'flex',gap:3}}>
             {['maj','min','dom7','aug'].map(t=>{
@@ -2105,6 +2295,8 @@ function App(){
               );
             })}
           </div>
+          </>}
+          {walkMode.id!=='tonal'&&<>
           <div style={{fontSize:8,letterSpacing:2,color:'#2a2a3e'}}>DÉPART</div>
           <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
             <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
@@ -2132,11 +2324,12 @@ function App(){
               ))}
             </div>
           </div>
+          </>}
           {/* Walk history */}
           {walkHistory.length>1&&(
             <div style={{display:'flex',gap:3,overflowX:'auto',paddingBottom:2}}>
               {walkHistory.slice(-10).map((id,i)=>{
-                const n=parseNid(id),q=Q[n.type],flat=usesFlat(n.root);
+                const n=parseNid(id),q=Q[n.type]||{color:'#888'},flat=usesFlat(n.root);
                 const isCur=id===currentWalkId;
                 return(
                   <div key={i} style={{flexShrink:0,padding:'2px 7px',borderRadius:5,
