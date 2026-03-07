@@ -335,6 +335,8 @@ input[type=range]{accent-color:#FFB300}
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback,useMemo,memo}=React;
 
+const API_URL='https://quintessence-api.onrender.com';
+
 // ═══════════════════════════════════════════════════════════
 // MUSIC THEORY
 // ═══════════════════════════════════════════════════════════
@@ -1592,9 +1594,13 @@ function App(){
   const[viewMode,setViewMode]=useState('circle'); // circle | network | piano
   const[showPiano,setShowPiano]=useState(true);
   const[showPicker,setShowPicker]=useState(false);
-  const[pickerTab,setPickerTab]=useState('songs'); // progressions|songs|custom
+  const[pickerTab,setPickerTab]=useState('songs'); // progressions|songs|custom|youtube
   const[customInput,setCustomInput]=useState('');
   const[searchQuery,setSearchQuery]=useState('');
+  const[ytUrl,setYtUrl]=useState('');
+  const[ytLoading,setYtLoading]=useState(false);
+  const[ytError,setYtError]=useState('');
+  const[ytResult,setYtResult]=useState(null);
   const[showSess,setShowSess]=useState(false);
   const[voicingMode,setVoicingMode]=useState('shell'); // shell | rootless
 
@@ -2618,7 +2624,7 @@ function App(){
           {/* Header with tabs */}
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
             <div style={{display:'flex',gap:3}}>
-              {[['songs','🎵 Chansons'],['progressions','♩ Patterns'],['custom','✏️ Perso']].map(([t,l])=>(
+              {[['songs','🎵 Chansons'],['youtube','▶ YouTube'],['progressions','♩ Patterns'],['custom','✏️ Perso']].map(([t,l])=>(
                 <button key={t} onClick={()=>setPickerTab(t)}
                   style={{padding:'6px 12px',borderRadius:8,fontSize:10,
                     background:pickerTab===t?'rgba(255,179,0,.15)':'rgba(255,255,255,.03)',
@@ -2673,6 +2679,88 @@ function App(){
             </div>
           )}
           
+          {/* YouTube analysis */}
+          {pickerTab==='youtube'&&(
+            <div style={{flex:1,display:'flex',flexDirection:'column',gap:12}}>
+              <div style={{fontSize:10,color:'#666',lineHeight:1.5}}>
+                Collez un lien YouTube pour extraire les accords automatiquement.
+                <br/><span style={{color:'#FFB30088',fontSize:9}}>L'analyse peut prendre 30-60 secondes.</span>
+              </div>
+              <div style={{display:'flex',gap:6}}>
+                <input type="text" placeholder="https://youtube.com/watch?v=..." value={ytUrl}
+                  onChange={e=>{setYtUrl(e.target.value);setYtError('');}}
+                  style={{flex:1,padding:'10px 14px',borderRadius:10,background:'rgba(255,255,255,.04)',
+                    border:'1px solid #2a2a3a',color:'#c8c0b0',fontSize:13,outline:'none'}}/>
+                <button onClick={async()=>{
+                  if(!ytUrl.trim()||ytLoading)return;
+                  setYtLoading(true);setYtError('');setYtResult(null);
+                  try{
+                    const res=await fetch(API_URL+'/analyze',{
+                      method:'POST',
+                      headers:{'Content-Type':'application/json'},
+                      body:JSON.stringify({url:ytUrl.trim(),beats_per_chord:2}),
+                    });
+                    const data=await res.json();
+                    if(!res.ok)throw new Error(data.error||'Erreur serveur');
+                    if(!data.chords||!data.chords.length)throw new Error('Aucun accord détecté');
+                    setYtResult(data);
+                  }catch(e){setYtError(e.message);}
+                  finally{setYtLoading(false);}
+                }}
+                  disabled={ytLoading||!ytUrl.trim()}
+                  style={{padding:'10px 18px',borderRadius:10,fontSize:12,fontWeight:600,
+                    background:ytLoading?'rgba(255,179,0,.08)':'rgba(255,179,0,.18)',
+                    border:'1px solid #FFB30066',color:ytLoading?'#665200':'#FFB300',
+                    cursor:ytLoading?'wait':'pointer',whiteSpace:'nowrap'}}>
+                  {ytLoading?'Analyse...':'Analyser'}
+                </button>
+              </div>
+              {ytError&&<div style={{padding:'8px 12px',borderRadius:8,background:'rgba(255,23,68,.1)',
+                border:'1px solid rgba(255,23,68,.3)',color:'#ff6680',fontSize:11}}>{ytError}</div>}
+              {ytLoading&&(
+                <div style={{padding:20,textAlign:'center'}}>
+                  <div style={{fontSize:12,color:'#FFB30088',marginBottom:8}}>Téléchargement et analyse en cours...</div>
+                  <div style={{width:40,height:40,border:'3px solid #1a1a28',borderTop:'3px solid #FFB300',
+                    borderRadius:'50%',margin:'0 auto',
+                    animation:'spin 1s linear infinite'}}/>
+                  <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+                </div>
+              )}
+              {ytResult&&(
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  <div style={{padding:'10px 12px',borderRadius:10,background:'rgba(255,255,255,.03)',border:'1px solid #1e1e2e'}}>
+                    <div style={{fontSize:13,color:'#c8c0b0',fontWeight:600,marginBottom:4}}>{ytResult.title}</div>
+                    <div style={{display:'flex',gap:12,fontSize:9,color:'#555'}}>
+                      <span>BPM: {ytResult.tempo}</span>
+                      <span>Durée: {Math.floor(ytResult.duration/60)}m{Math.round(ytResult.duration%60)}s</span>
+                      <span>{ytResult.chords.length} accords</span>
+                    </div>
+                  </div>
+                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                    {ytResult.chords.map((c,i)=>{const q=Q[c.type]||{color:'#888'};return(
+                      <div key={i} style={{padding:'3px 7px',borderRadius:5,
+                        background:q.color+'18',border:`1px solid ${q.color}33`,
+                        fontSize:10,color:q.color,fontFamily:'Georgia,serif'}}>
+                        {c.chord}
+                        <span style={{fontSize:7,color:'#3a3a4a',marginLeft:3}}>{Math.floor(c.time/60)}:{String(Math.round(c.time%60)).padStart(2,'0')}</span>
+                      </div>
+                    );})}
+                  </div>
+                  <button onClick={()=>{
+                    const chords=ytResult.chords.map(c=>({root:c.root,type:c.type}));
+                    setProgression({id:'yt_'+Date.now(),cat:'YouTube',name:ytResult.title,chords});
+                    setShowPicker(false);setYtResult(null);setYtUrl('');
+                  }}
+                    style={{padding:'12px 20px',borderRadius:10,
+                      background:'rgba(0,230,118,.15)',border:'1px solid #00E67666',
+                      color:'#00E676',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                    Jouer cette progression
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Progressions list */}
           {pickerTab==='progressions'&&(
             <div style={{overflowY:'auto',flex:1,display:'flex',flexDirection:'column',gap:4}}>
